@@ -56,11 +56,34 @@ pio device monitor -e xiao_esp32s3_sensor
 
 Node pošle packet, otevře krátké RX okno (`DOWNLINK_RX_WINDOW_MS`) pro downlink a pak jde do deep sleep.
 
+## 2b) Flash distance node (JSN-SR04T, battery)
+
+Pro nový node použij env:
+
+```powershell
+cd firmware
+pio run -e xiao_esp32s3_distance_node -t upload
+pio device monitor -e xiao_esp32s3_distance_node
+```
+
+Výchozí perioda odeslání je 5 minut (`DISTANCE_TX_INTERVAL_SEC=300`).
+
+Doporučené piny v [firmware/include/lora_config.h](firmware/include/lora_config.h):
+- `JSN_TRIG_PIN`
+- `JSN_ECHO_PIN`
+- `JSN_POWER_PIN` (volitelné, přes tranzistorové spínání napájení)
+
+Poznámka k HW:
+- `JSN-SR04T` často vrací `ECHO` na 5V, proto použij level shifter / dělič napětí na vstup ESP32.
+
 ## 3) Home Assistant
 
 V HA musí běžet MQTT broker (typicky Mosquitto addon).
 Po prvním paketu se automaticky vytvoří entity přes MQTT Discovery:
 - `temperature`, `humidity`, `pressure`, `battery`, `rssi`, `snr`
+
+U distance node se vytvoří a plní zejména:
+- `distance_cm`, `battery`, `rssi`, `snr`
 
 Topicy:
 - `lora2ha/node/<node_id>/state`
@@ -106,9 +129,13 @@ Konfigurace v [firmware/include/lora_config.h](firmware/include/lora_config.h):
 Gateway zároveň hostuje web OTA stránku:
 - `http://<gateway_ip>/`
 
+Status endpoint (JSON):
+- `http://<gateway_ip>/status`
+
 Funkce:
 - upload `.bin` firmware souboru pro `xiao_esp32s3_gateway`
 - po úspěšném uploadu automatický restart gateway
+- JSON diagnostika (`wifi_connected`, `mqtt_connected`, `uptime_sec`, `free_heap`, ...)
 
 Autentizace:
 - pokud je `OTA_PASSWORD` prázdné, web je bez auth
@@ -151,6 +178,8 @@ pio run -e xiao_esp32s3_sensor -t upload --upload-port lora-sensor.local
 
 V repu je připravený package se helpery + skripty:
 - [docs/homeassistant/lora_controls_package.yaml](docs/homeassistant/lora_controls_package.yaml)
+- Gateway status package (REST):
+- [docs/homeassistant/lora_gateway_status_package.yaml](docs/homeassistant/lora_gateway_status_package.yaml)
 
 Co obsahuje:
 - `input_text.lora_target_node_id`
@@ -167,6 +196,11 @@ homeassistant:
 
 Pak zkopíruj soubor do HA:
 - `<config>/packages/lora_controls_package.yaml`
+
+Pro monitoring gateway status endpointu `/status` zkopíruj také:
+- `<config>/packages/lora_gateway_status_package.yaml`
+
+Pak v HA nastav `input_text.lora_gateway_ip` na IP adresu gateway.
 
 A udělej `Restart Home Assistant`.
 

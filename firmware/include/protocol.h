@@ -6,6 +6,7 @@ namespace lora_app {
 
 enum MessageType : uint8_t {
   MSG_TELEMETRY = 0x01,
+  MSG_DISTANCE = 0x04,
   MSG_STATUS = 0x02,
   MSG_ALARM = 0x03,
   MSG_DOWNLINK_CMD = 0x10,
@@ -36,6 +37,18 @@ struct TelemetryPacketV1 {
   int16_t temp_c_x100;
   uint16_t rh_x100;
   uint16_t pressure_pa_div10;
+  uint8_t flags;
+  uint16_t crc16;
+};
+
+struct DistancePacketV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint32_t frame_counter;
+  uint32_t unix_time;
+  uint16_t battery_mV;
+  uint16_t distance_mm;
   uint8_t flags;
   uint16_t crc16;
 };
@@ -97,6 +110,10 @@ inline bool validate_packet_crc(const TelemetryPacketV1 &packet) {
   return validate_crc_typed(packet);
 }
 
+inline bool validate_packet_crc(const DistancePacketV1 &packet) {
+  return validate_crc_typed(packet);
+}
+
 inline bool validate_packet_crc(const DownlinkPacketV1 &packet) {
   return validate_crc_typed(packet);
 }
@@ -106,6 +123,10 @@ inline bool validate_packet_crc(const AckPacketV1 &packet) {
 }
 
 inline void finalize_packet_crc(TelemetryPacketV1 &packet) {
+  finalize_crc_typed(packet);
+}
+
+inline void finalize_packet_crc(DistancePacketV1 &packet) {
   finalize_crc_typed(packet);
 }
 

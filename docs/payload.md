@@ -59,6 +59,26 @@ Celkem: 18 B.
 - `1` `ACK_UNSUPPORTED_CMD`
 - `2` `ACK_INVALID_VALUE`
 
+## DistancePacketV1
+
+Binární struktura (`DistancePacketV1`):
+
+- `proto_ver` (u8)
+- `msg_type` (u8, `0x04`)
+- `node_id` (u32)
+- `frame_counter` (u32)
+- `unix_time` (u32)
+- `battery_mV` (u16)
+- `distance_mm` (u16)
+- `flags` (u8)
+- `crc16` (u16, CCITT)
+
+Celkem: 21 B.
+
+### Distance flags
+
+- bit `0`: měření vzdálenosti selhalo (timeout/no echo)
+
 ## Hodnoty
 
 - `temp_c_x100`: `2356` => `23.56 °C`

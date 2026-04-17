@@ -1,0 +1,5 @@
+.pio/
+firmware/.pio/
+.pioenvs/
+.piolibdeps/
+.mypy_cache/

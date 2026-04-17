@@ -73,6 +73,30 @@
 #define APP_TX_INTERVAL_MAX_SEC 86400
 #endif
 
+#ifndef DISTANCE_TX_INTERVAL_SEC
+#define DISTANCE_TX_INTERVAL_SEC 300
+#endif
+
+#ifndef DISTANCE_NODE_ID
+#define DISTANCE_NODE_ID 2001
+#endif
+
+#ifndef JSN_TRIG_PIN
+#define JSN_TRIG_PIN 1
+#endif
+
+#ifndef JSN_ECHO_PIN
+#define JSN_ECHO_PIN 2
+#endif
+
+#ifndef JSN_POWER_PIN
+#define JSN_POWER_PIN -1
+#endif
+
+#ifndef JSN_PING_TIMEOUT_US
+#define JSN_PING_TIMEOUT_US 38000UL
+#endif
+
 #ifndef DOWNLINK_RX_WINDOW_MS
 #define DOWNLINK_RX_WINDOW_MS 2500
 #endif

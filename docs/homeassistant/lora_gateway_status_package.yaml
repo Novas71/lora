@@ -1,0 +1,54 @@
+rest:
+  - resource_template: "http://{{ states('input_text.lora_gateway_ip') }}/status"
+    method: GET
+    scan_interval: 30
+    timeout: 10
+    sensor:
+      - name: "LoRa Gateway Status"
+        unique_id: lora_gateway_status
+        value_template: "{{ 'online' if value_json.wifi_connected and value_json.mqtt_connected else 'degraded' }}"
+        json_attributes:
+          - ip
+          - hostname
+          - wifi_connected
+          - wifi_rssi
+          - mqtt_connected
+          - mqtt_host
+          - mqtt_port
+          - mqtt_base_topic
+          - uptime_sec
+          - free_heap
+          - sketch_size
+          - free_sketch_space
+
+input_text:
+  lora_gateway_ip:
+    name: LoRa Gateway IP
+    initial: "192.168.1.50"
+    max: 64
+
+template:
+  - sensor:
+      - name: "LoRa Gateway Uptime"
+        unique_id: lora_gateway_uptime_sec
+        unit_of_measurement: "s"
+        state: "{{ state_attr('sensor.lora_gateway_status', 'uptime_sec') | int(0) }}"
+
+      - name: "LoRa Gateway RSSI"
+        unique_id: lora_gateway_wifi_rssi
+        unit_of_measurement: "dBm"
+        device_class: signal_strength
+        state: "{{ state_attr('sensor.lora_gateway_status', 'wifi_rssi') | int(-127) }}"
+
+      - name: "LoRa Gateway Free Heap"
+        unique_id: lora_gateway_free_heap
+        unit_of_measurement: "B"
+        state: "{{ state_attr('sensor.lora_gateway_status', 'free_heap') | int(0) }}"
+
+      - name: "LoRa Gateway MQTT"
+        unique_id: lora_gateway_mqtt_connected
+        state: "{{ 'online' if state_attr('sensor.lora_gateway_status', 'mqtt_connected') else 'offline' }}"
+
+      - name: "LoRa Gateway WiFi"
+        unique_id: lora_gateway_wifi_connected
+        state: "{{ 'online' if state_attr('sensor.lora_gateway_status', 'wifi_connected') else 'offline' }}"

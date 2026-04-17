@@ -71,6 +71,31 @@ static bool webAuthOk() {
 }
 
 static void setupWebOtaServer() {
+  webServer.on("/status", HTTP_GET, []() {
+    if (!webAuthOk()) {
+      return;
+    }
+
+    JsonDocument doc;
+    doc["device"] = "lora-gateway";
+    doc["ip"] = WiFi.localIP().toString();
+    doc["hostname"] = OTA_HOSTNAME_GATEWAY;
+    doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+    doc["wifi_rssi"] = WiFi.RSSI();
+    doc["mqtt_connected"] = mqttClient.connected();
+    doc["mqtt_host"] = config.mqttHost;
+    doc["mqtt_port"] = config.mqttPort;
+    doc["mqtt_base_topic"] = config.mqttBaseTopic;
+    doc["uptime_sec"] = millis() / 1000UL;
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["sketch_size"] = ESP.getSketchSize();
+    doc["free_sketch_space"] = ESP.getFreeSketchSpace();
+
+    String payload;
+    serializeJson(doc, payload);
+    webServer.send(200, "application/json", payload);
+  });
+
   webServer.on("/", HTTP_GET, []() {
     if (!webAuthOk()) {
       return;
@@ -91,6 +116,7 @@ static void setupWebOtaServer() {
     page += "<p><button type='submit' style='padding:.6rem 1rem'>Upload & Flash</button></p>";
     page += "</form>";
     page += "<p style='color:#666'>Použij .bin soubor pro env xiao_esp32s3_gateway.</p>";
+    page += "<p><a href='/status'>Gateway status JSON</a></p>";
     page += "</body></html>";
 
     webServer.send(200, "text/html", page);
@@ -574,6 +600,13 @@ static void publishDiscoveryNode(uint32_t nodeId) {
   publishDiscoverySensor(nodeId, "snr", "SNR", "dB", "", "measurement");
 }
 
+static void publishDiscoveryDistanceNode(uint32_t nodeId) {
+  publishDiscoverySensor(nodeId, "distance_cm", "Distance", "cm", "distance", "measurement");
+  publishDiscoverySensor(nodeId, "battery", "Battery", "V", "voltage", "measurement");
+  publishDiscoverySensor(nodeId, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
+  publishDiscoverySensor(nodeId, "snr", "SNR", "dB", "", "measurement");
+}
+
 static void publishTelemetryMqtt(const TelemetryPacketV1 &pkt, float rssi, float snr) {
   char stateTopic[128];
   char statusTopic[128];
@@ -639,6 +672,54 @@ static void publishAckMqtt(const AckPacketV1 &ack, float rssi, float snr) {
       rssi,
       snr);
   mqttClient.publish(ackTopic, ackPayload, false);
+}
+
+static void publishDistanceMqtt(const DistancePacketV1 &pkt, float rssi, float snr) {
+  char stateTopic[128];
+  char statusTopic[128];
+  char availabilityTopic[128];
+  char statePayload[256];
+  char statusPayload[256];
+
+  if (!isNodeDiscovered(pkt.node_id)) {
+    publishDiscoveryDistanceNode(pkt.node_id);
+    markNodeDiscovered(pkt.node_id);
+  }
+
+  topicForNode(stateTopic, sizeof(stateTopic), pkt.node_id, "state");
+  topicForNode(statusTopic, sizeof(statusTopic), pkt.node_id, "status");
+  topicForNode(availabilityTopic, sizeof(availabilityTopic), pkt.node_id, "availability");
+
+  const float distanceCm = pkt.distance_mm / 10.0f;
+  const float batteryV = (pkt.battery_mV > 0) ? (pkt.battery_mV / 1000.0f) : 0.0f;
+
+  snprintf(
+      statePayload,
+      sizeof(statePayload),
+      "{\"distance_cm\":%.1f,\"battery\":%.3f,\"rssi\":%.1f,\"snr\":%.1f,\"fcnt\":%lu,\"flags\":%u}",
+      distanceCm,
+      batteryV,
+      rssi,
+      snr,
+      static_cast<unsigned long>(pkt.frame_counter),
+      pkt.flags);
+
+  snprintf(
+      statusPayload,
+      sizeof(statusPayload),
+      "{\"proto\":%u,\"node_id\":%lu,\"fcnt\":%lu,\"distance_cm\":%.1f,\"battery\":%.3f,\"flags\":%u,\"rssi\":%.1f,\"snr\":%.1f}",
+      pkt.proto_ver,
+      static_cast<unsigned long>(pkt.node_id),
+      static_cast<unsigned long>(pkt.frame_counter),
+      distanceCm,
+      batteryV,
+      pkt.flags,
+      rssi,
+      snr);
+
+  mqttClient.publish(stateTopic, statePayload, false);
+  mqttClient.publish(statusTopic, statusPayload, false);
+  publishRetained(availabilityTopic, "online");
 }
 
 static void maybeSendPendingDownlink(uint32_t nodeId, uint32_t currentFcnt) {
@@ -765,6 +846,20 @@ void loop() {
                     ack.status,
                     static_cast<unsigned long>(ack.current_interval_sec));
       publishAckMqtt(ack, rssi, snr);
+    }
+  } else if (packetLen >= 2 && bytes[0] == 1 && bytes[1] == MSG_DISTANCE && packetLen == sizeof(DistancePacketV1)) {
+    DistancePacketV1 pkt{};
+    memcpy(&pkt, bytes, sizeof(pkt));
+    if (!validate_packet_crc(pkt)) {
+      Serial.println("{\"error\":\"distance_crc\"}");
+    } else {
+      Serial.printf("Distance node=%lu fcnt=%lu distance=%.1f cm flags=%u\n",
+                    static_cast<unsigned long>(pkt.node_id),
+                    static_cast<unsigned long>(pkt.frame_counter),
+                    pkt.distance_mm / 10.0f,
+                    pkt.flags);
+      publishDistanceMqtt(pkt, rssi, snr);
+      maybeSendPendingDownlink(pkt.node_id, pkt.frame_counter);
     }
   } else {
     Serial.printf("Unknown packet len=%u msg_type=%u\n", static_cast<unsigned>(packetLen), bytes[1]);
