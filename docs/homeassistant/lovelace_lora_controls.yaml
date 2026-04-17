@@ -1,0 +1,76 @@
+title: LoRa Node Controls
+type: vertical-stack
+cards:
+  - type: entities
+    title: LoRa Target
+    show_header_toggle: false
+    entities:
+      - entity: input_text.lora_target_node_id
+        name: Node ID
+      - entity: input_number.lora_target_interval_sec
+        name: Interval (sec)
+      - entity: input_number.lora_ota_window_sec
+        name: OTA Window (sec)
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Ping
+        icon: mdi:wifi-check
+        tap_action:
+          action: call-service
+          service: script.lora_ping_node
+      - type: button
+        name: Set Interval
+        icon: mdi:timer-cog
+        tap_action:
+          action: call-service
+          service: script.lora_set_interval_node
+      - type: button
+        name: Reboot
+        icon: mdi:restart
+        tap_action:
+          action: call-service
+          service: script.lora_reboot_node
+
+  - type: button
+    name: Enter OTA Mode
+    icon: mdi:upload-network
+    tap_action:
+      action: call-service
+      service: script.lora_enter_ota_node
+
+  - type: entities
+    title: Last ACK (from MQTT)
+    show_header_toggle: false
+    entities:
+      - entity: sensor.lora_last_ack
+        name: ACK status
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: node_id
+        name: Node ID
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: acked_fcnt
+        name: Acked FCNT
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: cmd
+        name: Command
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: status
+        name: Status
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: interval_sec
+        name: Interval sec
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: rssi
+        name: RSSI
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: snr
+        name: SNR

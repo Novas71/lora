@@ -1,0 +1,89 @@
+input_text:
+  lora_target_node_id:
+    name: LoRa Target Node ID
+    initial: "1001"
+    max: 10
+
+input_number:
+  lora_target_interval_sec:
+    name: LoRa Target Interval (sec)
+    min: 30
+    max: 86400
+    step: 10
+    mode: box
+    initial: 300
+  lora_ota_window_sec:
+    name: LoRa OTA Window (sec)
+    min: 60
+    max: 3600
+    step: 30
+    mode: box
+    initial: 300
+
+script:
+  lora_ping_node:
+    alias: LoRa Ping Node
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: '{"cmd":"ping"}'
+
+  lora_reboot_node:
+    alias: LoRa Reboot Node
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: '{"cmd":"reboot"}'
+
+  lora_set_interval_node:
+    alias: LoRa Set Interval
+    mode: single
+    sequence:
+      - variables:
+          sec: "{{ states('input_number.lora_target_interval_sec') | int(300) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'set_interval','sec': sec} | tojson }}"
+
+  lora_enter_ota_node:
+    alias: LoRa Enter OTA
+    mode: single
+    sequence:
+      - variables:
+          sec: "{{ states('input_number.lora_ota_window_sec') | int(300) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'enter_ota','sec': sec} | tojson }}"
+
+mqtt:
+  sensor:
+    - name: "LoRa Last ACK"
+      unique_id: lora_last_ack_payload
+      state_topic: "lora2ha/node/+/ack"
+      value_template: "{{ value_json.status | default(-1) }}"
+      json_attributes_topic: "lora2ha/node/+/ack"
+
+automation:
+  - id: lora_ack_notification
+    alias: LoRa ACK Notification
+    mode: queued
+    trigger:
+      - platform: mqtt
+        topic: "lora2ha/node/+/ack"
+    action:
+      - variables:
+          data: "{{ trigger.payload_json if trigger.payload_json is defined else {} }}"
+          node_id: "{{ data.node_id | default('unknown') }}"
+          cmd: "{{ data.cmd | default('n/a') }}"
+          status: "{{ data.status | default('n/a') }}"
+          interval_sec: "{{ data.interval_sec | default('n/a') }}"
+      - service: persistent_notification.create
+        data:
+          title: "LoRa ACK node {{ node_id }}"
+          message: "cmd={{ cmd }}, status={{ status }}, interval={{ interval_sec }}s"

@@ -1,0 +1,164 @@
+title: LoRa Multi-Node Controls
+type: vertical-stack
+cards:
+  - type: markdown
+    content: |
+      ## LoRa Multi-Node Control
+      Tento dashboard používá stejný `input_text.lora_target_node_id` + skripty,
+      takže před kliknutím na tlačítko nastav cílové `Node ID` v horním panelu.
+
+  - type: entities
+    title: Target Selector
+    entities:
+      - entity: input_text.lora_target_node_id
+        name: Active Node ID
+      - entity: input_number.lora_target_interval_sec
+        name: Interval sec
+      - entity: input_number.lora_ota_window_sec
+        name: OTA window sec
+
+  - type: grid
+    title: Quick Actions (Node 1001 / 1002 / 1003)
+    columns: 3
+    square: false
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "### Node 1001"
+          - type: button
+            name: Select 1001
+            icon: mdi:numeric-1-circle
+            tap_action:
+              action: call-service
+              service: input_text.set_value
+              data:
+                entity_id: input_text.lora_target_node_id
+                value: "1001"
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Ping
+                icon: mdi:wifi-check
+                tap_action:
+                  action: call-service
+                  service: script.lora_ping_node
+              - type: button
+                name: Reboot
+                icon: mdi:restart
+                tap_action:
+                  action: call-service
+                  service: script.lora_reboot_node
+          - type: button
+            name: Set Interval
+            icon: mdi:timer-cog
+            tap_action:
+              action: call-service
+              service: script.lora_set_interval_node
+          - type: button
+            name: Enter OTA
+            icon: mdi:upload-network
+            tap_action:
+              action: call-service
+              service: script.lora_enter_ota_node
+
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "### Node 1002"
+          - type: button
+            name: Select 1002
+            icon: mdi:numeric-2-circle
+            tap_action:
+              action: call-service
+              service: input_text.set_value
+              data:
+                entity_id: input_text.lora_target_node_id
+                value: "1002"
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Ping
+                icon: mdi:wifi-check
+                tap_action:
+                  action: call-service
+                  service: script.lora_ping_node
+              - type: button
+                name: Reboot
+                icon: mdi:restart
+                tap_action:
+                  action: call-service
+                  service: script.lora_reboot_node
+          - type: button
+            name: Set Interval
+            icon: mdi:timer-cog
+            tap_action:
+              action: call-service
+              service: script.lora_set_interval_node
+          - type: button
+            name: Enter OTA
+            icon: mdi:upload-network
+            tap_action:
+              action: call-service
+              service: script.lora_enter_ota_node
+
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: "### Node 1003"
+          - type: button
+            name: Select 1003
+            icon: mdi:numeric-3-circle
+            tap_action:
+              action: call-service
+              service: input_text.set_value
+              data:
+                entity_id: input_text.lora_target_node_id
+                value: "1003"
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Ping
+                icon: mdi:wifi-check
+                tap_action:
+                  action: call-service
+                  service: script.lora_ping_node
+              - type: button
+                name: Reboot
+                icon: mdi:restart
+                tap_action:
+                  action: call-service
+                  service: script.lora_reboot_node
+          - type: button
+            name: Set Interval
+            icon: mdi:timer-cog
+            tap_action:
+              action: call-service
+              service: script.lora_set_interval_node
+          - type: button
+            name: Enter OTA
+            icon: mdi:upload-network
+            tap_action:
+              action: call-service
+              service: script.lora_enter_ota_node
+
+  - type: entities
+    title: Last ACK
+    entities:
+      - entity: sensor.lora_last_ack
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: node_id
+        name: Node
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: cmd
+        name: Cmd
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: status
+        name: Status
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: interval_sec
+        name: Interval
