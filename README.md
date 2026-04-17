@@ -101,6 +101,21 @@ Konfigurace v [firmware/include/lora_config.h](firmware/include/lora_config.h):
 - `OTA_HOSTNAME_GATEWAY`
 - `OTA_PASSWORD` (volitelně)
 
+### Gateway OTA přes web interface
+
+Gateway zároveň hostuje web OTA stránku:
+- `http://<gateway_ip>/`
+
+Funkce:
+- upload `.bin` firmware souboru pro `xiao_esp32s3_gateway`
+- po úspěšném uploadu automatický restart gateway
+
+Autentizace:
+- pokud je `OTA_PASSWORD` prázdné, web je bez auth
+- pokud je `OTA_PASSWORD` nastavené, web používá Basic Auth
+	- user: `admin`
+	- password: hodnota `OTA_PASSWORD`
+
 ### Node OTA (na vyžádání)
 
 Node je normálně v deep sleep. OTA režim se spouští downlinkem:

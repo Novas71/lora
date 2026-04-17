@@ -235,6 +235,12 @@
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/cores/esp32/HashBuilder.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/cores/esp32/HEXBuilder.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/WebServer.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/HTTP_Method.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/Uri.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/middleware/Middleware.h \
+ C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/detail/RequestHandler.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiType.h \
@@ -247,12 +253,6 @@
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkUdp.h \
  .pio/libdeps/xiao_esp32s3_gateway/WiFiManager/WiFiManager.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/WebServer.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/HTTP_Method.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/Uri.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/middleware/Middleware.h \
- C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/detail/RequestHandler.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/DNSServer/src/DNSServer.h \
  C:/Users/z133052/.platformio/packages/framework-arduinoespressif32/libraries/AsyncUDP/src/AsyncUDP.h \
  .pio/libdeps/xiao_esp32s3_gateway/WiFiManager/wm_strings_en.h \

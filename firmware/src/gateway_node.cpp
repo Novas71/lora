@@ -4,6 +4,8 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
+#include <Update.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <Preferences.h>
@@ -17,9 +19,11 @@ SX1262 radio = new Module(LORA_CS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PI
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 Preferences prefs;
+WebServer webServer(80);
 
 volatile bool receivedFlag = false;
 volatile bool rxInterruptEnabled = true;
+static bool webUploadAuthorized = false;
 
 struct GatewayConfig {
   char mqttHost[64];
@@ -53,6 +57,99 @@ static void setupOta() {
 
   ArduinoOTA.begin();
   Serial.printf("OTA ready hostname=%s\n", OTA_HOSTNAME_GATEWAY);
+}
+
+static bool webAuthOk() {
+  if (strlen(OTA_PASSWORD) == 0) {
+    return true;
+  }
+  if (webServer.authenticate("admin", OTA_PASSWORD)) {
+    return true;
+  }
+  webServer.requestAuthentication();
+  return false;
+}
+
+static void setupWebOtaServer() {
+  webServer.on("/", HTTP_GET, []() {
+    if (!webAuthOk()) {
+      return;
+    }
+
+    String page;
+    page.reserve(1600);
+    page += "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+    page += "<title>LoRa Gateway OTA</title></head><body style='font-family:sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem'>";
+    page += "<h2>LoRa Gateway OTA</h2>";
+    page += "<p><b>IP:</b> ";
+    page += WiFi.localIP().toString();
+    page += "<br><b>Hostname:</b> ";
+    page += OTA_HOSTNAME_GATEWAY;
+    page += "</p>";
+    page += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+    page += "<p><input type='file' name='firmware' accept='.bin' required></p>";
+    page += "<p><button type='submit' style='padding:.6rem 1rem'>Upload & Flash</button></p>";
+    page += "</form>";
+    page += "<p style='color:#666'>Použij .bin soubor pro env xiao_esp32s3_gateway.</p>";
+    page += "</body></html>";
+
+    webServer.send(200, "text/html", page);
+  });
+
+  webServer.on(
+      "/update",
+      HTTP_POST,
+      []() {
+        if (!webAuthOk()) {
+          return;
+        }
+
+        const bool success = webUploadAuthorized && !Update.hasError();
+        webServer.send(success ? 200 : 500, "text/plain", success ? "Update OK, rebooting..." : "Update failed");
+        delay(400);
+        if (success) {
+          ESP.restart();
+        }
+      },
+      []() {
+        HTTPUpload &upload = webServer.upload();
+
+        if (upload.status == UPLOAD_FILE_START) {
+          webUploadAuthorized = (strlen(OTA_PASSWORD) == 0) || webServer.authenticate("admin", OTA_PASSWORD);
+          if (!webUploadAuthorized) {
+            return;
+          }
+
+          Serial.printf("HTTP OTA start: %s\n", upload.filename.c_str());
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+          if (!webUploadAuthorized) {
+            return;
+          }
+          if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_END) {
+          if (!webUploadAuthorized) {
+            return;
+          }
+          if (Update.end(true)) {
+            Serial.printf("HTTP OTA success, size=%u\n", upload.totalSize);
+          } else {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_ABORTED) {
+          if (webUploadAuthorized) {
+            Update.abort();
+          }
+          Serial.println("HTTP OTA aborted");
+        }
+      });
+
+  webServer.begin();
+  Serial.printf("HTTP OTA server ready: http://%s/\n", WiFi.localIP().toString().c_str());
 }
 
 bool shouldSavePortalConfig = false;
@@ -597,6 +694,7 @@ void setup() {
 
   ensureMqttConnected();
   setupOta();
+  setupWebOtaServer();
 
   radio.setDio1Action(setFlag);
   state = radio.startReceive();
@@ -612,6 +710,7 @@ void loop() {
   ensureMqttConnected();
   mqttClient.loop();
   ArduinoOTA.handle();
+  webServer.handleClient();
 
   if (!receivedFlag) {
     delay(10);
