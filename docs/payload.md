@@ -37,6 +37,9 @@ Celkem: 18 B.
 - `0x02` `CMD_SET_INTERVAL_SEC` (`value_u32 = sec`)
 - `0x03` `CMD_REBOOT`
 - `0x04` `CMD_ENTER_OTA` (`value_u32 = ota_window_sec`)
+- `0x20` `CMD_SET_TANK_AREA_M2_X1000` (`value_u32 = area_m2 * 1000`)
+- `0x21` `CMD_SET_TANK_DISTANCE_MIN_MM` (`value_u32 = min_mm`)
+- `0x22` `CMD_SET_TANK_DISTANCE_MAX_MM` (`value_u32 = max_mm`)
 
 ## AckPacketV1
 
@@ -70,14 +73,22 @@ Binární struktura (`DistancePacketV1`):
 - `unix_time` (u32)
 - `battery_mV` (u16)
 - `distance_mm` (u16)
+- `level_mm` (u16)
+- `water_liters_x10` (u32)
 - `flags` (u8)
 - `crc16` (u16, CCITT)
 
-Celkem: 21 B.
+Celkem: 27 B.
 
 ### Distance flags
 
 - bit `0`: měření vzdálenosti selhalo (timeout/no echo)
+
+### Výpočty pro nádrž
+
+- `level_mm = TANK_DISTANCE_MAX_MM - distance_mm` (saturace na `0 .. (TANK_DISTANCE_MAX_MM - TANK_DISTANCE_MIN_MM)`)
+- `water_liters_x10 = water_liters * 10`
+- `water_liters = water_liters_x10 / 10.0`
 
 ## Hodnoty
 

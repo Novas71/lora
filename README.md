@@ -56,7 +56,7 @@ pio device monitor -e xiao_esp32s3_sensor
 
 Node pošle packet, otevře krátké RX okno (`DOWNLINK_RX_WINDOW_MS`) pro downlink a pak jde do deep sleep.
 
-## 2b) Flash distance node (JSN-SR04T, battery)
+## 2b) Flash distance node (JSN-SR04T, vodní nádrž)
 
 Pro nový node použij env:
 
@@ -67,6 +67,16 @@ pio device monitor -e xiao_esp32s3_distance_node
 ```
 
 Výchozí perioda odeslání je 5 minut (`DISTANCE_TX_INTERVAL_SEC=300`).
+
+Node je připravený jako senzor objemu vody v nádrži.
+Konfigurace v [firmware/include/lora_config.h](firmware/include/lora_config.h):
+- `TANK_AREA_M2` – plocha nádrže v m²
+- `TANK_DISTANCE_MIN_MM` – minimální vzdálenost hladiny od senzoru (typicky plná nádrž)
+- `TANK_DISTANCE_MAX_MM` – maximální vzdálenost hladiny od senzoru (typicky prázdná nádrž)
+
+Výpočet v node:
+- `hladina_mm = TANK_DISTANCE_MAX_MM - naměřená_vzdálenost_mm` (saturace do rozsahu min/max)
+- `objem_l = TANK_AREA_M2 * hladina_mm`
 
 Doporučené piny v [firmware/include/lora_config.h](firmware/include/lora_config.h):
 - `JSN_TRIG_PIN`
@@ -83,7 +93,10 @@ Po prvním paketu se automaticky vytvoří entity přes MQTT Discovery:
 - `temperature`, `humidity`, `pressure`, `battery`, `rssi`, `snr`
 
 U distance node se vytvoří a plní zejména:
-- `distance_cm`, `battery`, `rssi`, `snr`
+- `distance_cm` (aktuální vzdálenost od senzoru)
+- `level_cm` (výška hladiny)
+- `water_l` (vypočtený objem vody)
+- `battery`, `rssi`, `snr`
 
 Topicy:
 - `lora2ha/node/<node_id>/state`
@@ -102,6 +115,12 @@ Podporované JSON příkazy:
 - `{"cmd":"reboot"}`
 - `{"cmd":"set_interval","sec":300}`
 - `{"cmd":"enter_ota","sec":300}`
+- `{"cmd":"set_tank_area","area_m2":1.25}`
+- `{"cmd":"set_tank_min_mm","min_mm":250}`
+- `{"cmd":"set_tank_max_mm","max_mm":1900}`
+
+Poznámka:
+- konfigurace nádrže se uloží do NVS v distance node a zůstane zachovaná po restartu/deep sleep.
 
 Node vrací ACK do:
 - `lora2ha/node/<node_id>/ack`
@@ -217,6 +236,10 @@ Použití v dashboardu:
 
 Pro multi-node variantu vlož místo toho obsah z
 - [docs/homeassistant/lovelace_lora_controls_multi.yaml](docs/homeassistant/lovelace_lora_controls_multi.yaml)
+
+Poznámka:
+- v kartách je mini panel Tank Metrics s příkladovými entitami `sensor.lora_2001_distance_cm`, `sensor.lora_2001_level_cm`, `sensor.lora_2001_water_l`
+- pokud má Home Assistant entity pojmenované jinak, uprav tyto 3 entity přímo v Lovelace YAML
 
 ## 6) Volitelně: Python bridge
 

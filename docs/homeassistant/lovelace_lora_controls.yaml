@@ -11,6 +11,12 @@ cards:
         name: Interval (sec)
       - entity: input_number.lora_ota_window_sec
         name: OTA Window (sec)
+      - entity: input_number.lora_tank_area_m2
+        name: Tank area (m²)
+      - entity: input_number.lora_tank_min_mm
+        name: Tank min distance (mm)
+      - entity: input_number.lora_tank_max_mm
+        name: Tank max distance (mm)
 
   - type: horizontal-stack
     cards:
@@ -39,6 +45,38 @@ cards:
     tap_action:
       action: call-service
       service: script.lora_enter_ota_node
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Set Tank Area
+        icon: mdi:vector-square
+        tap_action:
+          action: call-service
+          service: script.lora_set_tank_area
+      - type: button
+        name: Set Tank Min
+        icon: mdi:arrow-collapse-down
+        tap_action:
+          action: call-service
+          service: script.lora_set_tank_min_mm
+      - type: button
+        name: Set Tank Max
+        icon: mdi:arrow-collapse-up
+        tap_action:
+          action: call-service
+          service: script.lora_set_tank_max_mm
+
+  - type: entities
+    title: Tank Metrics (example node 2001)
+    show_header_toggle: false
+    entities:
+      - entity: sensor.lora_2001_distance_cm
+        name: Distance (cm)
+      - entity: sensor.lora_2001_level_cm
+        name: Water level (cm)
+      - entity: sensor.lora_2001_water_l
+        name: Water volume (L)
 
   - type: entities
     title: Last ACK (from MQTT)

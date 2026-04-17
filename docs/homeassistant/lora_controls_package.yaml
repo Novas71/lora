@@ -1,7 +1,7 @@
 input_text:
   lora_target_node_id:
     name: LoRa Target Node ID
-    initial: "1001"
+    initial: "2001"
     max: 10
 
 input_number:
@@ -19,6 +19,27 @@ input_number:
     step: 30
     mode: box
     initial: 300
+  lora_tank_area_m2:
+    name: LoRa Tank Area (m2)
+    min: 0.1
+    max: 200.0
+    step: 0.1
+    mode: box
+    initial: 1.0
+  lora_tank_min_mm:
+    name: LoRa Tank Min Distance (mm)
+    min: 10
+    max: 10000
+    step: 10
+    mode: box
+    initial: 200
+  lora_tank_max_mm:
+    name: LoRa Tank Max Distance (mm)
+    min: 10
+    max: 10000
+    step: 10
+    mode: box
+    initial: 2000
 
 script:
   lora_ping_node:
@@ -60,6 +81,39 @@ script:
         data:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
           payload: "{{ {'cmd':'enter_ota','sec': sec} | tojson }}"
+
+  lora_set_tank_area:
+    alias: LoRa Set Tank Area
+    mode: single
+    sequence:
+      - variables:
+          area_m2: "{{ states('input_number.lora_tank_area_m2') | float(1.0) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'set_tank_area','area_m2': area_m2} | tojson }}"
+
+  lora_set_tank_min_mm:
+    alias: LoRa Set Tank Min Distance
+    mode: single
+    sequence:
+      - variables:
+          min_mm: "{{ states('input_number.lora_tank_min_mm') | int(200) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'set_tank_min_mm','min_mm': min_mm} | tojson }}"
+
+  lora_set_tank_max_mm:
+    alias: LoRa Set Tank Max Distance
+    mode: single
+    sequence:
+      - variables:
+          max_mm: "{{ states('input_number.lora_tank_max_mm') | int(2000) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'set_tank_max_mm','max_mm': max_mm} | tojson }}"
 
 mqtt:
   sensor:

@@ -18,6 +18,9 @@ enum DownlinkCommand : uint8_t {
   CMD_SET_INTERVAL_SEC = 0x02,
   CMD_REBOOT = 0x03,
   CMD_ENTER_OTA = 0x04,
+  CMD_SET_TANK_AREA_M2_X1000 = 0x20,
+  CMD_SET_TANK_DISTANCE_MIN_MM = 0x21,
+  CMD_SET_TANK_DISTANCE_MAX_MM = 0x22,
 };
 
 enum AckStatus : uint8_t {
@@ -49,6 +52,8 @@ struct DistancePacketV1 {
   uint32_t unix_time;
   uint16_t battery_mV;
   uint16_t distance_mm;
+  uint16_t level_mm;
+  uint32_t water_liters_x10;
   uint8_t flags;
   uint16_t crc16;
 };

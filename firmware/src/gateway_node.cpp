@@ -447,10 +447,22 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
   const DeserializationError err = deserializeJson(doc, payload, length);
   const char *cmd = nullptr;
   uint32_t value = 0;
+  float areaM2 = 0.0f;
 
   if (!err) {
     cmd = doc["cmd"] | "";
     value = doc["sec"] | doc["value"] | 0;
+    if (!doc["area_m2"].isNull()) {
+      areaM2 = doc["area_m2"].as<float>();
+    } else if (!doc["area"].isNull()) {
+      areaM2 = doc["area"].as<float>();
+    }
+    if (!doc["min_mm"].isNull()) {
+      value = doc["min_mm"].as<uint32_t>();
+    }
+    if (!doc["max_mm"].isNull()) {
+      value = doc["max_mm"].as<uint32_t>();
+    }
   } else {
     String raw;
     for (unsigned int i = 0; i < length; i++) {
@@ -475,6 +487,30 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
     downlinkCmd = CMD_SET_INTERVAL_SEC;
     if (value < APP_TX_INTERVAL_MIN_SEC || value > APP_TX_INTERVAL_MAX_SEC) {
       Serial.printf("Rejected set_interval out of range: %lu\n", static_cast<unsigned long>(value));
+      return;
+    }
+  } else if (strcmp(cmd, "set_tank_area") == 0 || strcmp(cmd, "set_tank_area_m2") == 0) {
+    downlinkCmd = CMD_SET_TANK_AREA_M2_X1000;
+    if (areaM2 <= 0.0f) {
+      Serial.printf("Rejected set_tank_area invalid area: %.4f\n", areaM2);
+      return;
+    }
+    const float areaX1000f = areaM2 * 1000.0f;
+    if (areaX1000f < 1.0f || areaX1000f > 4294967295.0f) {
+      Serial.printf("Rejected set_tank_area out of range: %.4f\n", areaM2);
+      return;
+    }
+    value = static_cast<uint32_t>(areaX1000f + 0.5f);
+  } else if (strcmp(cmd, "set_tank_min") == 0 || strcmp(cmd, "set_tank_min_mm") == 0) {
+    downlinkCmd = CMD_SET_TANK_DISTANCE_MIN_MM;
+    if (value == 0 || value > 65535) {
+      Serial.printf("Rejected set_tank_min_mm out of range: %lu\n", static_cast<unsigned long>(value));
+      return;
+    }
+  } else if (strcmp(cmd, "set_tank_max") == 0 || strcmp(cmd, "set_tank_max_mm") == 0) {
+    downlinkCmd = CMD_SET_TANK_DISTANCE_MAX_MM;
+    if (value == 0 || value > 65535) {
+      Serial.printf("Rejected set_tank_max_mm out of range: %lu\n", static_cast<unsigned long>(value));
       return;
     }
   } else {
@@ -602,6 +638,8 @@ static void publishDiscoveryNode(uint32_t nodeId) {
 
 static void publishDiscoveryDistanceNode(uint32_t nodeId) {
   publishDiscoverySensor(nodeId, "distance_cm", "Distance", "cm", "distance", "measurement");
+  publishDiscoverySensor(nodeId, "level_cm", "Water level", "cm", "distance", "measurement");
+  publishDiscoverySensor(nodeId, "water_l", "Water volume", "L", "volume_storage", "measurement");
   publishDiscoverySensor(nodeId, "battery", "Battery", "V", "voltage", "measurement");
   publishDiscoverySensor(nodeId, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
   publishDiscoverySensor(nodeId, "snr", "SNR", "dB", "", "measurement");
@@ -691,13 +729,17 @@ static void publishDistanceMqtt(const DistancePacketV1 &pkt, float rssi, float s
   topicForNode(availabilityTopic, sizeof(availabilityTopic), pkt.node_id, "availability");
 
   const float distanceCm = pkt.distance_mm / 10.0f;
+  const float levelCm = pkt.level_mm / 10.0f;
+  const float waterL = pkt.water_liters_x10 / 10.0f;
   const float batteryV = (pkt.battery_mV > 0) ? (pkt.battery_mV / 1000.0f) : 0.0f;
 
   snprintf(
       statePayload,
       sizeof(statePayload),
-      "{\"distance_cm\":%.1f,\"battery\":%.3f,\"rssi\":%.1f,\"snr\":%.1f,\"fcnt\":%lu,\"flags\":%u}",
+      "{\"distance_cm\":%.1f,\"level_cm\":%.1f,\"water_l\":%.1f,\"battery\":%.3f,\"rssi\":%.1f,\"snr\":%.1f,\"fcnt\":%lu,\"flags\":%u}",
       distanceCm,
+      levelCm,
+      waterL,
       batteryV,
       rssi,
       snr,
@@ -707,11 +749,13 @@ static void publishDistanceMqtt(const DistancePacketV1 &pkt, float rssi, float s
   snprintf(
       statusPayload,
       sizeof(statusPayload),
-      "{\"proto\":%u,\"node_id\":%lu,\"fcnt\":%lu,\"distance_cm\":%.1f,\"battery\":%.3f,\"flags\":%u,\"rssi\":%.1f,\"snr\":%.1f}",
+      "{\"proto\":%u,\"node_id\":%lu,\"fcnt\":%lu,\"distance_cm\":%.1f,\"level_cm\":%.1f,\"water_l\":%.1f,\"battery\":%.3f,\"flags\":%u,\"rssi\":%.1f,\"snr\":%.1f}",
       pkt.proto_ver,
       static_cast<unsigned long>(pkt.node_id),
       static_cast<unsigned long>(pkt.frame_counter),
       distanceCm,
+      levelCm,
+      waterL,
       batteryV,
       pkt.flags,
       rssi,

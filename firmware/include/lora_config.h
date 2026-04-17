@@ -81,6 +81,18 @@
 #define DISTANCE_NODE_ID 2001
 #endif
 
+#ifndef TANK_AREA_M2
+#define TANK_AREA_M2 1.0f
+#endif
+
+#ifndef TANK_DISTANCE_MIN_MM
+#define TANK_DISTANCE_MIN_MM 200
+#endif
+
+#ifndef TANK_DISTANCE_MAX_MM
+#define TANK_DISTANCE_MAX_MM 2000
+#endif
+
 #ifndef JSN_TRIG_PIN
 #define JSN_TRIG_PIN 1
 #endif
