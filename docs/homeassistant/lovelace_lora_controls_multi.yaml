@@ -189,8 +189,12 @@ cards:
         name: Node
       - type: attribute
         entity: sensor.lora_last_ack
-        attribute: cmd
-        name: Cmd
+        attribute: op
+        name: Operation
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: param
+        name: Parameter
       - type: attribute
         entity: sensor.lora_last_ack
         attribute: status

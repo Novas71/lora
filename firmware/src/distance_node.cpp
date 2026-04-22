@@ -7,6 +7,7 @@
 
 #include "lora_config.h"
 #include "protocol.h"
+#include "secure_transport.h"
 
 using namespace lora_app;
 
@@ -50,12 +51,15 @@ static bool configLooksValid(uint32_t areaX1000, uint16_t minMm, uint16_t maxMm)
 static void loadRuntimeConfig() {
   prefs.begin("distance", true);
 
+  const uint32_t loadedFrameCounter = prefs.getULong("fcnt", frameCounter);
   const uint32_t loadedInterval = prefs.getUInt("tx_i", txIntervalSec);
   const uint32_t loadedAreaX1000 = prefs.getUInt("area_x1k", tankAreaM2x1000);
   const uint16_t loadedMinMm = static_cast<uint16_t>(prefs.getUInt("dmin", tankDistanceMinMm));
   const uint16_t loadedMaxMm = static_cast<uint16_t>(prefs.getUInt("dmax", tankDistanceMaxMm));
 
   prefs.end();
+
+  frameCounter = loadedFrameCounter;
 
   if (loadedInterval >= APP_TX_INTERVAL_MIN_SEC && loadedInterval <= APP_TX_INTERVAL_MAX_SEC) {
     txIntervalSec = loadedInterval;
@@ -66,6 +70,12 @@ static void loadRuntimeConfig() {
     tankDistanceMinMm = loadedMinMm;
     tankDistanceMaxMm = loadedMaxMm;
   }
+}
+
+static void saveFrameCounter() {
+  prefs.begin("distance", false);
+  prefs.putULong("fcnt", frameCounter);
+  prefs.end();
 }
 
 static void saveRuntimeConfig() {
@@ -123,33 +133,52 @@ static bool readDistanceMillimeters(uint16_t &distanceMm) {
   return true;
 }
 
-static bool sendDistancePacket(uint16_t distanceMm, uint16_t levelMm, uint32_t waterLitersX10, bool measureOk) {
-  DistancePacketV1 pkt{};
-  pkt.proto_ver = 1;
-  pkt.msg_type = MSG_DISTANCE;
-  pkt.node_id = DISTANCE_NODE_ID;
-  pkt.frame_counter = frameCounter++;
-  pkt.unix_time = unixTimeNow();
-  pkt.battery_mV = readBatteryMilliVolts();
-  pkt.distance_mm = distanceMm;
-  pkt.level_mm = levelMm;
-  pkt.water_liters_x10 = waterLitersX10;
-  pkt.flags = measureOk ? 0x00 : 0x01;
-  finalize_packet_crc(pkt);
+static bool sendDistancePacket(uint16_t distanceMm, uint16_t levelMm, uint32_t waterLitersX10, bool measureOk,
+                               uint32_t &sentFrameCounter) {
+  constexpr uint8_t metricCount = 4;
+  uint8_t packet[metrics_packet_total_size(metricCount)]{};
+  const uint16_t batteryMv = readBatteryMilliVolts();
 
-  int state = radio.transmit(reinterpret_cast<uint8_t *>(&pkt), sizeof(pkt));
+  auto *header = reinterpret_cast<MetricsPacketHeaderV1 *>(packet);
+  header->proto_ver = 1;
+  header->msg_type = MSG_TELEMETRY;
+  header->node_id = DISTANCE_NODE_ID;
+  header->frame_counter = frameCounter++;
+  header->unix_time = unixTimeNow();
+  header->metric_count = metricCount;
+  header->flags = measureOk ? 0x00 : 0x01;
+
+  auto *records = metrics_packet_records(header);
+  records[0] = MetricRecordV1{METRIC_BATTERY_MV, batteryMv};
+  records[1] = MetricRecordV1{METRIC_DISTANCE_MM, distanceMm};
+  records[2] = MetricRecordV1{METRIC_LEVEL_MM, levelMm};
+  records[3] = MetricRecordV1{METRIC_WATER_L_X10, static_cast<int32_t>(waterLitersX10)};
+
+  finalize_metrics_packet(packet, sizeof(packet));
+
+  uint8_t encrypted[SECURE_MAX_FRAME_SIZE]{};
+  size_t encryptedLen = 0;
+  if (!secure_encrypt_frame(packet, sizeof(packet), encrypted, sizeof(encrypted), encryptedLen)) {
+    Serial.println("Distance TX encrypt failed");
+    return false;
+  }
+
+  int state = radio.transmit(encrypted, encryptedLen);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("Distance TX failed, state=%d\n", state);
     return false;
   }
 
+  sentFrameCounter = header->frame_counter;
+  saveFrameCounter();
+
   Serial.printf("Distance TX ok node=%lu fcnt=%lu distance=%u mm level=%u mm water=%.1f L flags=%u\n",
-                static_cast<unsigned long>(pkt.node_id),
-                static_cast<unsigned long>(pkt.frame_counter),
-                pkt.distance_mm,
-                pkt.level_mm,
-                pkt.water_liters_x10 / 10.0f,
-                pkt.flags);
+                static_cast<unsigned long>(header->node_id),
+                static_cast<unsigned long>(header->frame_counter),
+                distanceMm,
+                levelMm,
+                waterLitersX10 / 10.0f,
+                header->flags);
   return true;
 }
 
@@ -170,14 +199,27 @@ static bool waitForDownlink(DownlinkPacketV1 &downlink) {
     }
 
     rxWindowFlag = false;
-    uint8_t bytes[sizeof(DownlinkPacketV1)]{};
-    state = radio.readData(bytes, sizeof(bytes));
+    size_t packetLen = radio.getPacketLength();
+    if (packetLen == 0 || packetLen > SECURE_MAX_FRAME_SIZE) {
+      radio.startReceive();
+      continue;
+    }
+
+    uint8_t bytes[SECURE_MAX_FRAME_SIZE]{};
+    state = radio.readData(bytes, packetLen);
     if (state != RADIOLIB_ERR_NONE) {
       radio.startReceive();
       continue;
     }
 
-    memcpy(&downlink, bytes, sizeof(downlink));
+    uint8_t plain[sizeof(DownlinkPacketV1)]{};
+    size_t plainLen = 0;
+    if (!secure_decrypt_frame(bytes, packetLen, plain, sizeof(plain), plainLen) || plainLen != sizeof(DownlinkPacketV1)) {
+      radio.startReceive();
+      continue;
+    }
+
+    memcpy(&downlink, plain, sizeof(downlink));
     if (downlink.proto_ver != 1 || downlink.msg_type != MSG_DOWNLINK_CMD || downlink.node_id != DISTANCE_NODE_ID) {
       radio.startReceive();
       continue;
@@ -189,7 +231,10 @@ static bool waitForDownlink(DownlinkPacketV1 &downlink) {
       continue;
     }
 
-    Serial.printf("Downlink cmd=%u value=%lu\n", downlink.cmd, static_cast<unsigned long>(downlink.value_u32));
+    Serial.printf("Downlink op=%u param=%u value=%ld\n",
+                  downlink.operation,
+                  downlink.parameter_id,
+                  static_cast<long>(downlink.value_i32));
     return true;
   }
 
@@ -197,45 +242,58 @@ static bool waitForDownlink(DownlinkPacketV1 &downlink) {
 }
 
 static uint8_t applyDownlink(const DownlinkPacketV1 &downlink) {
-  switch (downlink.cmd) {
-    case CMD_PING:
+  switch (downlink.operation) {
+    case DL_OP_PING:
       return ACK_OK;
-    case CMD_SET_INTERVAL_SEC:
-      if (downlink.value_u32 < APP_TX_INTERVAL_MIN_SEC || downlink.value_u32 > APP_TX_INTERVAL_MAX_SEC) {
-        return ACK_INVALID_VALUE;
+    case DL_OP_SET_PARAM:
+      switch (downlink.parameter_id) {
+        case PARAM_TX_INTERVAL_SEC:
+          if (!parameter_value_is_valid(static_cast<ParameterId>(downlink.parameter_id), downlink.value_i32)) {
+            return ACK_INVALID_VALUE;
+          }
+          txIntervalSec = static_cast<uint32_t>(downlink.value_i32);
+          saveRuntimeConfig();
+          return ACK_OK;
+        case PARAM_TANK_AREA_M2_X1000:
+          if (!parameter_value_is_valid(static_cast<ParameterId>(downlink.parameter_id), downlink.value_i32)) {
+            return ACK_INVALID_VALUE;
+          }
+          if (!configLooksValid(static_cast<uint32_t>(downlink.value_i32), tankDistanceMinMm, tankDistanceMaxMm)) {
+            return ACK_INVALID_VALUE;
+          }
+          tankAreaM2x1000 = static_cast<uint32_t>(downlink.value_i32);
+          saveRuntimeConfig();
+          return ACK_OK;
+        case PARAM_TANK_DISTANCE_MIN_MM: {
+          if (!parameter_value_is_valid(static_cast<ParameterId>(downlink.parameter_id), downlink.value_i32)) {
+            return ACK_INVALID_VALUE;
+          }
+          const uint16_t newMin = static_cast<uint16_t>(downlink.value_i32 > 65535 ? 65535 : downlink.value_i32);
+          if (!configLooksValid(tankAreaM2x1000, newMin, tankDistanceMaxMm)) {
+            return ACK_INVALID_VALUE;
+          }
+          tankDistanceMinMm = newMin;
+          saveRuntimeConfig();
+          return ACK_OK;
+        }
+        case PARAM_TANK_DISTANCE_MAX_MM: {
+          if (!parameter_value_is_valid(static_cast<ParameterId>(downlink.parameter_id), downlink.value_i32)) {
+            return ACK_INVALID_VALUE;
+          }
+          const uint16_t newMax = static_cast<uint16_t>(downlink.value_i32 > 65535 ? 65535 : downlink.value_i32);
+          if (!configLooksValid(tankAreaM2x1000, tankDistanceMinMm, newMax)) {
+            return ACK_INVALID_VALUE;
+          }
+          tankDistanceMaxMm = newMax;
+          saveRuntimeConfig();
+          return ACK_OK;
+        }
+        default:
+          return ACK_UNSUPPORTED_CMD;
       }
-      txIntervalSec = downlink.value_u32;
-      saveRuntimeConfig();
+    case DL_OP_REBOOT:
       return ACK_OK;
-    case CMD_SET_TANK_AREA_M2_X1000:
-      if (downlink.value_u32 == 0) {
-        return ACK_INVALID_VALUE;
-      }
-      if (!configLooksValid(downlink.value_u32, tankDistanceMinMm, tankDistanceMaxMm)) {
-        return ACK_INVALID_VALUE;
-      }
-      tankAreaM2x1000 = downlink.value_u32;
-      saveRuntimeConfig();
-      return ACK_OK;
-    case CMD_SET_TANK_DISTANCE_MIN_MM: {
-      const uint16_t newMin = static_cast<uint16_t>(downlink.value_u32 > 65535 ? 65535 : downlink.value_u32);
-      if (!configLooksValid(tankAreaM2x1000, newMin, tankDistanceMaxMm)) {
-        return ACK_INVALID_VALUE;
-      }
-      tankDistanceMinMm = newMin;
-      saveRuntimeConfig();
-      return ACK_OK;
-    }
-    case CMD_SET_TANK_DISTANCE_MAX_MM: {
-      const uint16_t newMax = static_cast<uint16_t>(downlink.value_u32 > 65535 ? 65535 : downlink.value_u32);
-      if (!configLooksValid(tankAreaM2x1000, tankDistanceMinMm, newMax)) {
-        return ACK_INVALID_VALUE;
-      }
-      tankDistanceMaxMm = newMax;
-      saveRuntimeConfig();
-      return ACK_OK;
-    }
-    case CMD_REBOOT:
+    case DL_OP_ENTER_OTA:
       return ACK_OK;
     default:
       return ACK_UNSUPPORTED_CMD;
@@ -248,23 +306,32 @@ static void sendAck(const DownlinkPacketV1 &downlink, uint32_t ackedFrameCounter
   ack.msg_type = MSG_ACK;
   ack.node_id = DISTANCE_NODE_ID;
   ack.acked_frame_counter = ackedFrameCounter;
-  ack.acked_cmd = downlink.cmd;
+  ack.acked_operation = downlink.operation;
+  ack.acked_parameter_id = downlink.parameter_id;
   ack.status = status;
   ack.current_interval_sec = txIntervalSec;
   finalize_packet_crc(ack);
 
+  uint8_t encrypted[SECURE_MAX_FRAME_SIZE]{};
+  size_t encryptedLen = 0;
+  if (!secure_encrypt_frame(reinterpret_cast<const uint8_t *>(&ack), sizeof(ack), encrypted, sizeof(encrypted), encryptedLen)) {
+    Serial.println("ACK encrypt failed");
+    return;
+  }
+
   radio.standby();
-  int state = radio.transmit(reinterpret_cast<uint8_t *>(&ack), sizeof(ack));
+  int state = radio.transmit(encrypted, encryptedLen);
   if (state == RADIOLIB_ERR_NONE) {
-    Serial.printf("ACK sent cmd=%u status=%u interval=%lu\n",
-                  ack.acked_cmd,
+    Serial.printf("ACK sent op=%u param=%u status=%u interval=%lu\n",
+                  ack.acked_operation,
+                  ack.acked_parameter_id,
                   ack.status,
                   static_cast<unsigned long>(ack.current_interval_sec));
   } else {
     Serial.printf("ACK TX failed, state=%d\n", state);
   }
 
-  if (downlink.cmd == CMD_REBOOT && status == ACK_OK) {
+  if (downlink.operation == DL_OP_REBOOT && status == ACK_OK) {
     delay(200);
     ESP.restart();
   }
@@ -344,8 +411,8 @@ void setup() {
     waterLitersX10 = litersX10 <= 0.0f ? 0 : static_cast<uint32_t>(litersX10 + 0.5f);
   }
 
-  const uint32_t ackedFrameCounter = frameCounter;
-  const bool txOk = sendDistancePacket(clampedDistanceMm, levelMm, waterLitersX10, measureOk);
+  uint32_t ackedFrameCounter = 0;
+  const bool txOk = sendDistancePacket(clampedDistanceMm, levelMm, waterLitersX10, measureOk, ackedFrameCounter);
 
   if (txOk) {
     DownlinkPacketV1 downlink{};

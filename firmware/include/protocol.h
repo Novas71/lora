@@ -6,21 +6,36 @@ namespace lora_app {
 
 enum MessageType : uint8_t {
   MSG_TELEMETRY = 0x01,
-  MSG_DISTANCE = 0x04,
   MSG_STATUS = 0x02,
   MSG_ALARM = 0x03,
+  MSG_DISTANCE = 0x04,
   MSG_DOWNLINK_CMD = 0x10,
   MSG_ACK = 0x11,
 };
 
-enum DownlinkCommand : uint8_t {
-  CMD_PING = 0x01,
-  CMD_SET_INTERVAL_SEC = 0x02,
-  CMD_REBOOT = 0x03,
-  CMD_ENTER_OTA = 0x04,
-  CMD_SET_TANK_AREA_M2_X1000 = 0x20,
-  CMD_SET_TANK_DISTANCE_MIN_MM = 0x21,
-  CMD_SET_TANK_DISTANCE_MAX_MM = 0x22,
+enum MetricId : uint8_t {
+  METRIC_BATTERY_MV = 0x01,
+  METRIC_TEMPERATURE_C_X100 = 0x02,
+  METRIC_HUMIDITY_RH_X100 = 0x03,
+  METRIC_PRESSURE_HPA_X10 = 0x04,
+  METRIC_DISTANCE_MM = 0x10,
+  METRIC_LEVEL_MM = 0x11,
+  METRIC_WATER_L_X10 = 0x12,
+};
+
+enum DownlinkOperation : uint8_t {
+  DL_OP_PING = 0x01,
+  DL_OP_SET_PARAM = 0x02,
+  DL_OP_REBOOT = 0x03,
+  DL_OP_ENTER_OTA = 0x04,
+};
+
+enum ParameterId : uint16_t {
+  PARAM_NONE = 0x0000,
+  PARAM_TX_INTERVAL_SEC = 0x0001,
+  PARAM_TANK_AREA_M2_X1000 = 0x0101,
+  PARAM_TANK_DISTANCE_MIN_MM = 0x0102,
+  PARAM_TANK_DISTANCE_MAX_MM = 0x0103,
 };
 
 enum AckStatus : uint8_t {
@@ -30,32 +45,19 @@ enum AckStatus : uint8_t {
 };
 
 #pragma pack(push, 1)
-struct TelemetryPacketV1 {
+struct MetricsPacketHeaderV1 {
   uint8_t proto_ver;
   uint8_t msg_type;
   uint32_t node_id;
   uint32_t frame_counter;
   uint32_t unix_time;
-  uint16_t battery_mV;
-  int16_t temp_c_x100;
-  uint16_t rh_x100;
-  uint16_t pressure_pa_div10;
+  uint8_t metric_count;
   uint8_t flags;
-  uint16_t crc16;
 };
 
-struct DistancePacketV1 {
-  uint8_t proto_ver;
-  uint8_t msg_type;
-  uint32_t node_id;
-  uint32_t frame_counter;
-  uint32_t unix_time;
-  uint16_t battery_mV;
-  uint16_t distance_mm;
-  uint16_t level_mm;
-  uint32_t water_liters_x10;
-  uint8_t flags;
-  uint16_t crc16;
+struct MetricRecordV1 {
+  uint8_t metric_id;
+  int32_t value;
 };
 
 struct DownlinkPacketV1 {
@@ -63,9 +65,9 @@ struct DownlinkPacketV1 {
   uint8_t msg_type;
   uint32_t node_id;
   uint32_t target_frame_counter;
-  uint8_t cmd;
-  uint8_t reserved;
-  uint32_t value_u32;
+  uint8_t operation;
+  uint16_t parameter_id;
+  int32_t value_i32;
   uint16_t crc16;
 };
 
@@ -74,12 +76,90 @@ struct AckPacketV1 {
   uint8_t msg_type;
   uint32_t node_id;
   uint32_t acked_frame_counter;
-  uint8_t acked_cmd;
+  uint8_t acked_operation;
+  uint16_t acked_parameter_id;
   uint8_t status;
   uint32_t current_interval_sec;
   uint16_t crc16;
 };
 #pragma pack(pop)
+
+struct ParameterSchemaV1 {
+  ParameterId id;
+  const char *key;
+  int32_t min_value;
+  int32_t max_value;
+  float scale;
+};
+
+constexpr ParameterSchemaV1 PARAMETER_SCHEMAS_V1[] = {
+    {PARAM_TX_INTERVAL_SEC, "tx_interval_sec", 30, 86400, 1.0f},
+    {PARAM_TANK_AREA_M2_X1000, "tank_area_m2", 1, 200000, 1000.0f},
+    {PARAM_TANK_DISTANCE_MIN_MM, "tank_distance_min_mm", 1, 65535, 1.0f},
+    {PARAM_TANK_DISTANCE_MAX_MM, "tank_distance_max_mm", 1, 65535, 1.0f},
+};
+
+constexpr size_t PARAMETER_SCHEMA_COUNT_V1 = sizeof(PARAMETER_SCHEMAS_V1) / sizeof(PARAMETER_SCHEMAS_V1[0]);
+
+constexpr uint8_t METRICS_PACKET_MAX_RECORDS = 8;
+constexpr size_t METRICS_PACKET_MIN_SIZE = sizeof(MetricsPacketHeaderV1) + sizeof(uint16_t);
+
+constexpr size_t metrics_packet_total_size(uint8_t metricCount) {
+  return sizeof(MetricsPacketHeaderV1) + (static_cast<size_t>(metricCount) * sizeof(MetricRecordV1)) + sizeof(uint16_t);
+}
+
+inline MetricRecordV1 *metrics_packet_records(MetricsPacketHeaderV1 *header) {
+  return reinterpret_cast<MetricRecordV1 *>(reinterpret_cast<uint8_t *>(header) + sizeof(MetricsPacketHeaderV1));
+}
+
+inline const MetricRecordV1 *metrics_packet_records(const MetricsPacketHeaderV1 *header) {
+  return reinterpret_cast<const MetricRecordV1 *>(reinterpret_cast<const uint8_t *>(header) + sizeof(MetricsPacketHeaderV1));
+}
+
+inline const ParameterSchemaV1 *find_parameter_schema_by_id(ParameterId id) {
+  for (size_t i = 0; i < PARAMETER_SCHEMA_COUNT_V1; i++) {
+    if (PARAMETER_SCHEMAS_V1[i].id == id) {
+      return &PARAMETER_SCHEMAS_V1[i];
+    }
+  }
+  return nullptr;
+}
+
+inline const ParameterSchemaV1 *find_parameter_schema_by_key(const char *key) {
+  if (key == nullptr) {
+    return nullptr;
+  }
+
+  for (size_t i = 0; i < PARAMETER_SCHEMA_COUNT_V1; i++) {
+    if (strcmp(PARAMETER_SCHEMAS_V1[i].key, key) == 0) {
+      return &PARAMETER_SCHEMAS_V1[i];
+    }
+  }
+  return nullptr;
+}
+
+inline bool parameter_value_is_valid(ParameterId id, int32_t value) {
+  const ParameterSchemaV1 *schema = find_parameter_schema_by_id(id);
+  if (schema == nullptr) {
+    return false;
+  }
+  return value >= schema->min_value && value <= schema->max_value;
+}
+
+inline bool parameter_value_from_float(ParameterId id, float userValue, int32_t &encodedValue) {
+  const ParameterSchemaV1 *schema = find_parameter_schema_by_id(id);
+  if (schema == nullptr) {
+    return false;
+  }
+
+  const float scaled = userValue * schema->scale;
+  if (scaled > static_cast<float>(schema->max_value) || scaled < static_cast<float>(schema->min_value)) {
+    return false;
+  }
+
+  encodedValue = static_cast<int32_t>(scaled + (scaled >= 0.0f ? 0.5f : -0.5f));
+  return parameter_value_is_valid(id, encodedValue);
+}
 
 inline uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
   uint16_t crc = 0xFFFF;
@@ -111,12 +191,32 @@ inline void finalize_crc_typed(T &packet) {
   *crcField = crc16_ccitt(raw, sizeof(T) - sizeof(uint16_t));
 }
 
-inline bool validate_packet_crc(const TelemetryPacketV1 &packet) {
-  return validate_crc_typed(packet);
+inline bool validate_metrics_packet(const uint8_t *raw, size_t len) {
+  if (raw == nullptr || len < METRICS_PACKET_MIN_SIZE) {
+    return false;
+  }
+
+  const auto *header = reinterpret_cast<const MetricsPacketHeaderV1 *>(raw);
+  if (header->metric_count > METRICS_PACKET_MAX_RECORDS) {
+    return false;
+  }
+
+  if (len != metrics_packet_total_size(header->metric_count)) {
+    return false;
+  }
+
+  const auto *crcField = reinterpret_cast<const uint16_t *>(raw + len - sizeof(uint16_t));
+  const uint16_t computed = crc16_ccitt(raw, len - sizeof(uint16_t));
+  return computed == *crcField;
 }
 
-inline bool validate_packet_crc(const DistancePacketV1 &packet) {
-  return validate_crc_typed(packet);
+inline void finalize_metrics_packet(uint8_t *raw, size_t len) {
+  if (raw == nullptr || len < METRICS_PACKET_MIN_SIZE) {
+    return;
+  }
+
+  auto *crcField = reinterpret_cast<uint16_t *>(raw + len - sizeof(uint16_t));
+  *crcField = crc16_ccitt(raw, len - sizeof(uint16_t));
 }
 
 inline bool validate_packet_crc(const DownlinkPacketV1 &packet) {
@@ -125,14 +225,6 @@ inline bool validate_packet_crc(const DownlinkPacketV1 &packet) {
 
 inline bool validate_packet_crc(const AckPacketV1 &packet) {
   return validate_crc_typed(packet);
-}
-
-inline void finalize_packet_crc(TelemetryPacketV1 &packet) {
-  finalize_crc_typed(packet);
-}
-
-inline void finalize_packet_crc(DistancePacketV1 &packet) {
-  finalize_crc_typed(packet);
 }
 
 inline void finalize_packet_crc(DownlinkPacketV1 &packet) {

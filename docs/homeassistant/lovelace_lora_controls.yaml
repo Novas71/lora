@@ -94,8 +94,12 @@ cards:
         name: Acked FCNT
       - type: attribute
         entity: sensor.lora_last_ack
-        attribute: cmd
-        name: Command
+        attribute: op
+        name: Operation
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: param
+        name: Parameter
       - type: attribute
         entity: sensor.lora_last_ack
         attribute: status

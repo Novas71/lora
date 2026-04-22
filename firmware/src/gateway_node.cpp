@@ -12,6 +12,7 @@
 
 #include "lora_config.h"
 #include "protocol.h"
+#include "secure_transport.h"
 
 using namespace lora_app;
 
@@ -393,7 +394,7 @@ static PendingDownlink *findPending(uint32_t nodeId, bool createIfMissing) {
   return nullptr;
 }
 
-static void queueDownlinkCommand(uint32_t nodeId, uint8_t cmd, uint32_t value) {
+static void queueDownlinkCommand(uint32_t nodeId, uint8_t operation, uint16_t parameterId, int32_t value) {
   PendingDownlink *slot = findPending(nodeId, true);
   if (slot == nullptr) {
     Serial.println("Downlink queue full");
@@ -404,15 +405,16 @@ static void queueDownlinkCommand(uint32_t nodeId, uint8_t cmd, uint32_t value) {
   slot->packet.msg_type = MSG_DOWNLINK_CMD;
   slot->packet.node_id = nodeId;
   slot->packet.target_frame_counter = 0;
-  slot->packet.cmd = cmd;
-  slot->packet.reserved = 0;
-  slot->packet.value_u32 = value;
+  slot->packet.operation = operation;
+  slot->packet.parameter_id = parameterId;
+  slot->packet.value_i32 = value;
   finalize_packet_crc(slot->packet);
 
-  Serial.printf("Queued downlink node=%lu cmd=%u value=%lu\n",
+  Serial.printf("Queued downlink node=%lu op=%u param=%u value=%ld\n",
                 static_cast<unsigned long>(nodeId),
-                cmd,
-                static_cast<unsigned long>(value));
+                operation,
+                parameterId,
+                static_cast<long>(value));
 }
 
 static bool parseSetTopicNodeId(const char *topic, uint32_t &nodeId) {
@@ -446,23 +448,10 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
   JsonDocument doc;
   const DeserializationError err = deserializeJson(doc, payload, length);
   const char *cmd = nullptr;
-  uint32_t value = 0;
-  float areaM2 = 0.0f;
+  int32_t encodedValue = 0;
 
   if (!err) {
     cmd = doc["cmd"] | "";
-    value = doc["sec"] | doc["value"] | 0;
-    if (!doc["area_m2"].isNull()) {
-      areaM2 = doc["area_m2"].as<float>();
-    } else if (!doc["area"].isNull()) {
-      areaM2 = doc["area"].as<float>();
-    }
-    if (!doc["min_mm"].isNull()) {
-      value = doc["min_mm"].as<uint32_t>();
-    }
-    if (!doc["max_mm"].isNull()) {
-      value = doc["max_mm"].as<uint32_t>();
-    }
   } else {
     String raw;
     for (unsigned int i = 0; i < length; i++) {
@@ -470,55 +459,116 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
     }
     raw.trim();
     cmd = raw.c_str();
-    value = 0;
   }
 
-  uint8_t downlinkCmd = 0;
+  uint8_t downlinkOp = 0;
+  uint16_t downlinkParam = PARAM_NONE;
+
   if (strcmp(cmd, "ping") == 0) {
-    downlinkCmd = CMD_PING;
+    downlinkOp = DL_OP_PING;
   } else if (strcmp(cmd, "reboot") == 0) {
-    downlinkCmd = CMD_REBOOT;
+    downlinkOp = DL_OP_REBOOT;
   } else if (strcmp(cmd, "enter_ota") == 0) {
-    downlinkCmd = CMD_ENTER_OTA;
-    if (value == 0) {
-      value = OTA_DEFAULT_WINDOW_SEC;
+    downlinkOp = DL_OP_ENTER_OTA;
+    float otaSec = 0.0f;
+    if (!err) {
+      if (!doc["sec"].isNull()) {
+        otaSec = doc["sec"].as<float>();
+      } else if (!doc["value"].isNull()) {
+        otaSec = doc["value"].as<float>();
+      }
     }
-  } else if (strcmp(cmd, "set_interval") == 0 || strcmp(cmd, "set_interval_sec") == 0) {
-    downlinkCmd = CMD_SET_INTERVAL_SEC;
-    if (value < APP_TX_INTERVAL_MIN_SEC || value > APP_TX_INTERVAL_MAX_SEC) {
-      Serial.printf("Rejected set_interval out of range: %lu\n", static_cast<unsigned long>(value));
-      return;
+    if (otaSec <= 0.0f) {
+      otaSec = OTA_DEFAULT_WINDOW_SEC;
     }
-  } else if (strcmp(cmd, "set_tank_area") == 0 || strcmp(cmd, "set_tank_area_m2") == 0) {
-    downlinkCmd = CMD_SET_TANK_AREA_M2_X1000;
-    if (areaM2 <= 0.0f) {
-      Serial.printf("Rejected set_tank_area invalid area: %.4f\n", areaM2);
-      return;
-    }
-    const float areaX1000f = areaM2 * 1000.0f;
-    if (areaX1000f < 1.0f || areaX1000f > 4294967295.0f) {
-      Serial.printf("Rejected set_tank_area out of range: %.4f\n", areaM2);
-      return;
-    }
-    value = static_cast<uint32_t>(areaX1000f + 0.5f);
-  } else if (strcmp(cmd, "set_tank_min") == 0 || strcmp(cmd, "set_tank_min_mm") == 0) {
-    downlinkCmd = CMD_SET_TANK_DISTANCE_MIN_MM;
-    if (value == 0 || value > 65535) {
-      Serial.printf("Rejected set_tank_min_mm out of range: %lu\n", static_cast<unsigned long>(value));
-      return;
-    }
-  } else if (strcmp(cmd, "set_tank_max") == 0 || strcmp(cmd, "set_tank_max_mm") == 0) {
-    downlinkCmd = CMD_SET_TANK_DISTANCE_MAX_MM;
-    if (value == 0 || value > 65535) {
-      Serial.printf("Rejected set_tank_max_mm out of range: %lu\n", static_cast<unsigned long>(value));
-      return;
-    }
+    encodedValue = static_cast<int32_t>(otaSec + 0.5f);
   } else {
-    Serial.printf("Unsupported cmd: %s\n", cmd ? cmd : "<null>");
-    return;
+    const ParameterSchemaV1 *schema = nullptr;
+    float userValue = 0.0f;
+    bool hasUserValue = false;
+
+    if (strcmp(cmd, "set_param") == 0 || strcmp(cmd, "set_parameter") == 0) {
+      if (err) {
+        Serial.println("Rejected set_param: invalid JSON");
+        return;
+      }
+      const char *paramKey = doc["param"] | doc["parameter"] | "";
+      schema = find_parameter_schema_by_key(paramKey);
+      if (schema == nullptr) {
+        Serial.printf("Rejected set_param unknown param: %s\n", paramKey);
+        return;
+      }
+      if (!doc["value"].isNull()) {
+        userValue = doc["value"].as<float>();
+        hasUserValue = true;
+      }
+    } else if (strcmp(cmd, "set_interval") == 0 || strcmp(cmd, "set_interval_sec") == 0) {
+      schema = find_parameter_schema_by_id(PARAM_TX_INTERVAL_SEC);
+      if (!err) {
+        if (!doc["sec"].isNull()) {
+          userValue = doc["sec"].as<float>();
+          hasUserValue = true;
+        } else if (!doc["value"].isNull()) {
+          userValue = doc["value"].as<float>();
+          hasUserValue = true;
+        }
+      }
+    } else if (strcmp(cmd, "set_tank_area") == 0 || strcmp(cmd, "set_tank_area_m2") == 0) {
+      schema = find_parameter_schema_by_id(PARAM_TANK_AREA_M2_X1000);
+      if (!err) {
+        if (!doc["area_m2"].isNull()) {
+          userValue = doc["area_m2"].as<float>();
+          hasUserValue = true;
+        } else if (!doc["area"].isNull()) {
+          userValue = doc["area"].as<float>();
+          hasUserValue = true;
+        } else if (!doc["value"].isNull()) {
+          userValue = doc["value"].as<float>();
+          hasUserValue = true;
+        }
+      }
+    } else if (strcmp(cmd, "set_tank_min") == 0 || strcmp(cmd, "set_tank_min_mm") == 0) {
+      schema = find_parameter_schema_by_id(PARAM_TANK_DISTANCE_MIN_MM);
+      if (!err) {
+        if (!doc["min_mm"].isNull()) {
+          userValue = doc["min_mm"].as<float>();
+          hasUserValue = true;
+        } else if (!doc["value"].isNull()) {
+          userValue = doc["value"].as<float>();
+          hasUserValue = true;
+        }
+      }
+    } else if (strcmp(cmd, "set_tank_max") == 0 || strcmp(cmd, "set_tank_max_mm") == 0) {
+      schema = find_parameter_schema_by_id(PARAM_TANK_DISTANCE_MAX_MM);
+      if (!err) {
+        if (!doc["max_mm"].isNull()) {
+          userValue = doc["max_mm"].as<float>();
+          hasUserValue = true;
+        } else if (!doc["value"].isNull()) {
+          userValue = doc["value"].as<float>();
+          hasUserValue = true;
+        }
+      }
+    } else {
+      Serial.printf("Unsupported cmd: %s\n", cmd ? cmd : "<null>");
+      return;
+    }
+
+    if (schema == nullptr || !hasUserValue) {
+      Serial.printf("Rejected cmd %s: missing/invalid value\n", cmd ? cmd : "<null>");
+      return;
+    }
+
+    if (!parameter_value_from_float(schema->id, userValue, encodedValue)) {
+      Serial.printf("Rejected cmd %s: out of range value=%.3f\n", cmd ? cmd : "<null>", userValue);
+      return;
+    }
+
+    downlinkOp = DL_OP_SET_PARAM;
+    downlinkParam = schema->id;
   }
 
-  queueDownlinkCommand(nodeId, downlinkCmd, value);
+  queueDownlinkCommand(nodeId, downlinkOp, downlinkParam, encodedValue);
 }
 
 static void ensureWifiConnected() {
@@ -627,70 +677,180 @@ static void publishDiscoverySensor(uint32_t nodeId, const char *key, const char 
   }
 }
 
-static void publishDiscoveryNode(uint32_t nodeId) {
-  publishDiscoverySensor(nodeId, "temperature", "Temperature", "°C", "temperature", "measurement");
-  publishDiscoverySensor(nodeId, "humidity", "Humidity", "%", "humidity", "measurement");
-  publishDiscoverySensor(nodeId, "pressure", "Pressure", "hPa", "pressure", "measurement");
-  publishDiscoverySensor(nodeId, "battery", "Battery", "V", "voltage", "measurement");
-  publishDiscoverySensor(nodeId, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
-  publishDiscoverySensor(nodeId, "snr", "SNR", "dB", "", "measurement");
+static const char *metricKey(uint8_t metricId) {
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+      return "battery";
+    case METRIC_TEMPERATURE_C_X100:
+      return "temperature";
+    case METRIC_HUMIDITY_RH_X100:
+      return "humidity";
+    case METRIC_PRESSURE_HPA_X10:
+      return "pressure";
+    case METRIC_DISTANCE_MM:
+      return "distance_cm";
+    case METRIC_LEVEL_MM:
+      return "level_cm";
+    case METRIC_WATER_L_X10:
+      return "water_l";
+    default:
+      return nullptr;
+  }
 }
 
-static void publishDiscoveryDistanceNode(uint32_t nodeId) {
-  publishDiscoverySensor(nodeId, "distance_cm", "Distance", "cm", "distance", "measurement");
-  publishDiscoverySensor(nodeId, "level_cm", "Water level", "cm", "distance", "measurement");
-  publishDiscoverySensor(nodeId, "water_l", "Water volume", "L", "volume_storage", "measurement");
-  publishDiscoverySensor(nodeId, "battery", "Battery", "V", "voltage", "measurement");
-  publishDiscoverySensor(nodeId, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
-  publishDiscoverySensor(nodeId, "snr", "SNR", "dB", "", "measurement");
+static const char *metricName(uint8_t metricId) {
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+      return "Battery";
+    case METRIC_TEMPERATURE_C_X100:
+      return "Temperature";
+    case METRIC_HUMIDITY_RH_X100:
+      return "Humidity";
+    case METRIC_PRESSURE_HPA_X10:
+      return "Pressure";
+    case METRIC_DISTANCE_MM:
+      return "Distance";
+    case METRIC_LEVEL_MM:
+      return "Water level";
+    case METRIC_WATER_L_X10:
+      return "Water volume";
+    default:
+      return "Unknown";
+  }
 }
 
-static void publishTelemetryMqtt(const TelemetryPacketV1 &pkt, float rssi, float snr) {
+static const char *metricUnit(uint8_t metricId) {
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+      return "V";
+    case METRIC_TEMPERATURE_C_X100:
+      return "°C";
+    case METRIC_HUMIDITY_RH_X100:
+      return "%";
+    case METRIC_PRESSURE_HPA_X10:
+      return "hPa";
+    case METRIC_DISTANCE_MM:
+    case METRIC_LEVEL_MM:
+      return "cm";
+    case METRIC_WATER_L_X10:
+      return "L";
+    default:
+      return "";
+  }
+}
+
+static const char *metricDeviceClass(uint8_t metricId) {
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+      return "voltage";
+    case METRIC_TEMPERATURE_C_X100:
+      return "temperature";
+    case METRIC_HUMIDITY_RH_X100:
+      return "humidity";
+    case METRIC_PRESSURE_HPA_X10:
+      return "pressure";
+    case METRIC_DISTANCE_MM:
+    case METRIC_LEVEL_MM:
+      return "distance";
+    case METRIC_WATER_L_X10:
+      return "volume_storage";
+    default:
+      return "";
+  }
+}
+
+static const char *metricStateClass(uint8_t metricId) {
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+    case METRIC_TEMPERATURE_C_X100:
+    case METRIC_HUMIDITY_RH_X100:
+    case METRIC_PRESSURE_HPA_X10:
+    case METRIC_DISTANCE_MM:
+    case METRIC_LEVEL_MM:
+    case METRIC_WATER_L_X10:
+      return "measurement";
+    default:
+      return "";
+  }
+}
+
+static void publishDiscoveryMetric(uint32_t nodeId, uint8_t metricId) {
+  const char *key = metricKey(metricId);
+  if (key == nullptr) {
+    return;
+  }
+  publishDiscoverySensor(nodeId, key, metricName(metricId), metricUnit(metricId), metricDeviceClass(metricId),
+                         metricStateClass(metricId));
+}
+
+static void addMetricToJson(JsonDocument &doc, uint8_t metricId, int32_t value) {
+  const char *key = metricKey(metricId);
+  if (key == nullptr) {
+    return;
+  }
+
+  switch (metricId) {
+    case METRIC_BATTERY_MV:
+      doc[key] = value / 1000.0f;
+      break;
+    case METRIC_TEMPERATURE_C_X100:
+    case METRIC_HUMIDITY_RH_X100:
+      doc[key] = value / 100.0f;
+      break;
+    case METRIC_PRESSURE_HPA_X10:
+    case METRIC_DISTANCE_MM:
+    case METRIC_LEVEL_MM:
+    case METRIC_WATER_L_X10:
+      doc[key] = value / 10.0f;
+      break;
+    default:
+      doc[key] = value;
+      break;
+  }
+}
+
+static void publishTelemetryMqtt(const MetricsPacketHeaderV1 &header, const MetricRecordV1 *records, float rssi,
+                                 float snr) {
   char stateTopic[128];
   char statusTopic[128];
   char availabilityTopic[128];
-  char statePayload[256];
-  char statusPayload[256];
 
-  if (!isNodeDiscovered(pkt.node_id)) {
-    publishDiscoveryNode(pkt.node_id);
-    markNodeDiscovered(pkt.node_id);
+  topicForNode(stateTopic, sizeof(stateTopic), header.node_id, "state");
+  topicForNode(statusTopic, sizeof(statusTopic), header.node_id, "status");
+  topicForNode(availabilityTopic, sizeof(availabilityTopic), header.node_id, "availability");
+
+  publishDiscoverySensor(header.node_id, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
+  publishDiscoverySensor(header.node_id, "snr", "SNR", "dB", "", "measurement");
+
+  JsonDocument stateDoc;
+  JsonDocument statusDoc;
+
+  stateDoc["fcnt"] = header.frame_counter;
+  stateDoc["flags"] = header.flags;
+  stateDoc["rssi"] = rssi;
+  stateDoc["snr"] = snr;
+
+  statusDoc["proto"] = header.proto_ver;
+  statusDoc["node_id"] = header.node_id;
+  statusDoc["fcnt"] = header.frame_counter;
+  statusDoc["flags"] = header.flags;
+  statusDoc["metric_count"] = header.metric_count;
+  statusDoc["rssi"] = rssi;
+  statusDoc["snr"] = snr;
+
+  for (uint8_t i = 0; i < header.metric_count; i++) {
+    publishDiscoveryMetric(header.node_id, records[i].metric_id);
+    addMetricToJson(stateDoc, records[i].metric_id, records[i].value);
+    addMetricToJson(statusDoc, records[i].metric_id, records[i].value);
   }
 
-  topicForNode(stateTopic, sizeof(stateTopic), pkt.node_id, "state");
-  topicForNode(statusTopic, sizeof(statusTopic), pkt.node_id, "status");
-  topicForNode(availabilityTopic, sizeof(availabilityTopic), pkt.node_id, "availability");
+  String statePayload;
+  String statusPayload;
+  serializeJson(stateDoc, statePayload);
+  serializeJson(statusDoc, statusPayload);
 
-  snprintf(
-      statePayload,
-      sizeof(statePayload),
-      "{\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.1f,\"battery\":%.3f,\"rssi\":%.1f,\"snr\":%.1f,\"fcnt\":%lu,\"flags\":%u}",
-      pkt.temp_c_x100 / 100.0,
-      pkt.rh_x100 / 100.0,
-      pkt.pressure_pa_div10 / 10.0,
-      pkt.battery_mV / 1000.0,
-      rssi,
-      snr,
-      static_cast<unsigned long>(pkt.frame_counter),
-      pkt.flags);
-
-  snprintf(
-      statusPayload,
-      sizeof(statusPayload),
-      "{\"proto\":%u,\"node_id\":%lu,\"fcnt\":%lu,\"battery\":%.3f,\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.1f,\"flags\":%u,\"rssi\":%.1f,\"snr\":%.1f}",
-      pkt.proto_ver,
-      static_cast<unsigned long>(pkt.node_id),
-      static_cast<unsigned long>(pkt.frame_counter),
-      pkt.battery_mV / 1000.0,
-      pkt.temp_c_x100 / 100.0,
-      pkt.rh_x100 / 100.0,
-      pkt.pressure_pa_div10 / 10.0,
-      pkt.flags,
-      rssi,
-      snr);
-
-  mqttClient.publish(stateTopic, statePayload, false);
-  mqttClient.publish(statusTopic, statusPayload, false);
+  mqttClient.publish(stateTopic, statePayload.c_str(), false);
+  mqttClient.publish(statusTopic, statusPayload.c_str(), false);
   publishRetained(availabilityTopic, "online");
 }
 
@@ -701,69 +861,16 @@ static void publishAckMqtt(const AckPacketV1 &ack, float rssi, float snr) {
   snprintf(
       ackPayload,
       sizeof(ackPayload),
-      "{\"node_id\":%lu,\"acked_fcnt\":%lu,\"cmd\":%u,\"status\":%u,\"interval_sec\":%lu,\"rssi\":%.1f,\"snr\":%.1f}",
+  "{\"node_id\":%lu,\"acked_fcnt\":%lu,\"op\":%u,\"param\":%u,\"status\":%u,\"interval_sec\":%lu,\"rssi\":%.1f,\"snr\":%.1f}",
       static_cast<unsigned long>(ack.node_id),
       static_cast<unsigned long>(ack.acked_frame_counter),
-      ack.acked_cmd,
+  ack.acked_operation,
+  ack.acked_parameter_id,
       ack.status,
       static_cast<unsigned long>(ack.current_interval_sec),
       rssi,
       snr);
   mqttClient.publish(ackTopic, ackPayload, false);
-}
-
-static void publishDistanceMqtt(const DistancePacketV1 &pkt, float rssi, float snr) {
-  char stateTopic[128];
-  char statusTopic[128];
-  char availabilityTopic[128];
-  char statePayload[256];
-  char statusPayload[256];
-
-  if (!isNodeDiscovered(pkt.node_id)) {
-    publishDiscoveryDistanceNode(pkt.node_id);
-    markNodeDiscovered(pkt.node_id);
-  }
-
-  topicForNode(stateTopic, sizeof(stateTopic), pkt.node_id, "state");
-  topicForNode(statusTopic, sizeof(statusTopic), pkt.node_id, "status");
-  topicForNode(availabilityTopic, sizeof(availabilityTopic), pkt.node_id, "availability");
-
-  const float distanceCm = pkt.distance_mm / 10.0f;
-  const float levelCm = pkt.level_mm / 10.0f;
-  const float waterL = pkt.water_liters_x10 / 10.0f;
-  const float batteryV = (pkt.battery_mV > 0) ? (pkt.battery_mV / 1000.0f) : 0.0f;
-
-  snprintf(
-      statePayload,
-      sizeof(statePayload),
-      "{\"distance_cm\":%.1f,\"level_cm\":%.1f,\"water_l\":%.1f,\"battery\":%.3f,\"rssi\":%.1f,\"snr\":%.1f,\"fcnt\":%lu,\"flags\":%u}",
-      distanceCm,
-      levelCm,
-      waterL,
-      batteryV,
-      rssi,
-      snr,
-      static_cast<unsigned long>(pkt.frame_counter),
-      pkt.flags);
-
-  snprintf(
-      statusPayload,
-      sizeof(statusPayload),
-      "{\"proto\":%u,\"node_id\":%lu,\"fcnt\":%lu,\"distance_cm\":%.1f,\"level_cm\":%.1f,\"water_l\":%.1f,\"battery\":%.3f,\"flags\":%u,\"rssi\":%.1f,\"snr\":%.1f}",
-      pkt.proto_ver,
-      static_cast<unsigned long>(pkt.node_id),
-      static_cast<unsigned long>(pkt.frame_counter),
-      distanceCm,
-      levelCm,
-      waterL,
-      batteryV,
-      pkt.flags,
-      rssi,
-      snr);
-
-  mqttClient.publish(stateTopic, statePayload, false);
-  mqttClient.publish(statusTopic, statusPayload, false);
-  publishRetained(availabilityTopic, "online");
 }
 
 static void maybeSendPendingDownlink(uint32_t nodeId, uint32_t currentFcnt) {
@@ -775,14 +882,23 @@ static void maybeSendPendingDownlink(uint32_t nodeId, uint32_t currentFcnt) {
   slot->packet.target_frame_counter = currentFcnt;
   finalize_packet_crc(slot->packet);
 
+  uint8_t encrypted[SECURE_MAX_FRAME_SIZE]{};
+  size_t encryptedLen = 0;
+  if (!secure_encrypt_frame(reinterpret_cast<const uint8_t *>(&slot->packet), sizeof(slot->packet), encrypted,
+                            sizeof(encrypted), encryptedLen)) {
+    Serial.println("Downlink encrypt failed");
+    return;
+  }
+
   rxInterruptEnabled = false;
   radio.standby();
-  int state = radio.transmit(reinterpret_cast<uint8_t *>(&slot->packet), sizeof(slot->packet));
+  int state = radio.transmit(encrypted, encryptedLen);
   if (state == RADIOLIB_ERR_NONE) {
-    Serial.printf("Downlink sent node=%lu cmd=%u value=%lu\n",
+    Serial.printf("Downlink sent node=%lu op=%u param=%u value=%ld\n",
                   static_cast<unsigned long>(nodeId),
-                  slot->packet.cmd,
-                  static_cast<unsigned long>(slot->packet.value_u32));
+                  slot->packet.operation,
+                  slot->packet.parameter_id,
+                  static_cast<long>(slot->packet.value_i32));
     slot->inUse = false;
   } else {
     Serial.printf("Downlink TX failed state=%d\n", state);
@@ -846,13 +962,13 @@ void loop() {
   receivedFlag = false;
 
   size_t packetLen = radio.getPacketLength();
-  if (packetLen == 0 || packetLen > 64) {
+  if (packetLen == 0 || packetLen > SECURE_MAX_FRAME_SIZE) {
     radio.startReceive();
     rxInterruptEnabled = true;
     return;
   }
 
-  uint8_t bytes[64]{};
+  uint8_t bytes[SECURE_MAX_FRAME_SIZE]{};
   int state = radio.readData(bytes, packetLen);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("{\"error\":\"read\",\"state\":%d}\n", state);
@@ -864,49 +980,46 @@ void loop() {
   const float rssi = radio.getRSSI();
   const float snr = radio.getSNR();
 
-  if (packetLen >= 2 && bytes[0] == 1 && bytes[1] == MSG_TELEMETRY && packetLen == sizeof(TelemetryPacketV1)) {
-    TelemetryPacketV1 pkt{};
-    memcpy(&pkt, bytes, sizeof(pkt));
-    if (!validate_packet_crc(pkt)) {
+  uint8_t plain[64]{};
+  size_t plainLen = 0;
+  if (!secure_decrypt_frame(bytes, packetLen, plain, sizeof(plain), plainLen)) {
+    Serial.println("{\"error\":\"decrypt\"}");
+    radio.startReceive();
+    rxInterruptEnabled = true;
+    return;
+  }
+
+  if (plainLen >= 2 && plain[0] == 1 && plain[1] == MSG_TELEMETRY) {
+    if (!validate_metrics_packet(plain, plainLen)) {
       Serial.println("{\"error\":\"crc\"}");
     } else {
-      Serial.printf("Telemetry node=%lu fcnt=%lu rssi=%.1f snr=%.1f\n",
-                    static_cast<unsigned long>(pkt.node_id),
-                    static_cast<unsigned long>(pkt.frame_counter),
+      const auto *header = reinterpret_cast<const MetricsPacketHeaderV1 *>(plain);
+      const auto *records = metrics_packet_records(header);
+      Serial.printf("Telemetry node=%lu fcnt=%lu metrics=%u rssi=%.1f snr=%.1f\n",
+                    static_cast<unsigned long>(header->node_id),
+                    static_cast<unsigned long>(header->frame_counter),
+                    header->metric_count,
                     rssi,
                     snr);
-      publishTelemetryMqtt(pkt, rssi, snr);
-      maybeSendPendingDownlink(pkt.node_id, pkt.frame_counter);
+      publishTelemetryMqtt(*header, records, rssi, snr);
+      maybeSendPendingDownlink(header->node_id, header->frame_counter);
     }
-  } else if (packetLen >= 2 && bytes[0] == 1 && bytes[1] == MSG_ACK && packetLen == sizeof(AckPacketV1)) {
+  } else if (plainLen >= 2 && plain[0] == 1 && plain[1] == MSG_ACK && plainLen == sizeof(AckPacketV1)) {
     AckPacketV1 ack{};
-    memcpy(&ack, bytes, sizeof(ack));
+    memcpy(&ack, plain, sizeof(ack));
     if (!validate_packet_crc(ack)) {
       Serial.println("{\"error\":\"ack_crc\"}");
     } else {
-      Serial.printf("ACK node=%lu cmd=%u status=%u interval=%lu\n",
+      Serial.printf("ACK node=%lu op=%u param=%u status=%u interval=%lu\n",
                     static_cast<unsigned long>(ack.node_id),
-                    ack.acked_cmd,
+                    ack.acked_operation,
+            ack.acked_parameter_id,
                     ack.status,
                     static_cast<unsigned long>(ack.current_interval_sec));
       publishAckMqtt(ack, rssi, snr);
     }
-  } else if (packetLen >= 2 && bytes[0] == 1 && bytes[1] == MSG_DISTANCE && packetLen == sizeof(DistancePacketV1)) {
-    DistancePacketV1 pkt{};
-    memcpy(&pkt, bytes, sizeof(pkt));
-    if (!validate_packet_crc(pkt)) {
-      Serial.println("{\"error\":\"distance_crc\"}");
-    } else {
-      Serial.printf("Distance node=%lu fcnt=%lu distance=%.1f cm flags=%u\n",
-                    static_cast<unsigned long>(pkt.node_id),
-                    static_cast<unsigned long>(pkt.frame_counter),
-                    pkt.distance_mm / 10.0f,
-                    pkt.flags);
-      publishDistanceMqtt(pkt, rssi, snr);
-      maybeSendPendingDownlink(pkt.node_id, pkt.frame_counter);
-    }
   } else {
-    Serial.printf("Unknown packet len=%u msg_type=%u\n", static_cast<unsigned>(packetLen), bytes[1]);
+    Serial.printf("Unknown packet len=%u msg_type=%u\n", static_cast<unsigned>(plainLen), plain[1]);
   }
 
   radio.startReceive();

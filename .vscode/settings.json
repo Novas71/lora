@@ -2,6 +2,7 @@
     "chat.tools.terminal.autoApprove": {
         "Push-Location": true,
         "pio": true,
-        "Pop-Location": true
+        "Pop-Location": true,
+        "platformio": true
     }
 }

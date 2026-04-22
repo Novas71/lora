@@ -69,7 +69,7 @@ script:
       - service: mqtt.publish
         data:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
-          payload: "{{ {'cmd':'set_interval','sec': sec} | tojson }}"
+          payload: "{{ {'cmd':'set_param','param':'tx_interval_sec','value': sec} | tojson }}"
 
   lora_enter_ota_node:
     alias: LoRa Enter OTA
@@ -91,7 +91,7 @@ script:
       - service: mqtt.publish
         data:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
-          payload: "{{ {'cmd':'set_tank_area','area_m2': area_m2} | tojson }}"
+          payload: "{{ {'cmd':'set_param','param':'tank_area_m2','value': area_m2} | tojson }}"
 
   lora_set_tank_min_mm:
     alias: LoRa Set Tank Min Distance
@@ -102,7 +102,7 @@ script:
       - service: mqtt.publish
         data:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
-          payload: "{{ {'cmd':'set_tank_min_mm','min_mm': min_mm} | tojson }}"
+          payload: "{{ {'cmd':'set_param','param':'tank_distance_min_mm','value': min_mm} | tojson }}"
 
   lora_set_tank_max_mm:
     alias: LoRa Set Tank Max Distance
@@ -113,7 +113,7 @@ script:
       - service: mqtt.publish
         data:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
-          payload: "{{ {'cmd':'set_tank_max_mm','max_mm': max_mm} | tojson }}"
+          payload: "{{ {'cmd':'set_param','param':'tank_distance_max_mm','value': max_mm} | tojson }}"
 
 mqtt:
   sensor:
@@ -134,10 +134,11 @@ automation:
       - variables:
           data: "{{ trigger.payload_json if trigger.payload_json is defined else {} }}"
           node_id: "{{ data.node_id | default('unknown') }}"
-          cmd: "{{ data.cmd | default('n/a') }}"
+          op: "{{ data.op | default('n/a') }}"
+          param: "{{ data.param | default('n/a') }}"
           status: "{{ data.status | default('n/a') }}"
           interval_sec: "{{ data.interval_sec | default('n/a') }}"
       - service: persistent_notification.create
         data:
           title: "LoRa ACK node {{ node_id }}"
-          message: "cmd={{ cmd }}, status={{ status }}, interval={{ interval_sec }}s"
+          message: "op={{ op }}, param={{ param }}, status={{ status }}, interval={{ interval_sec }}s"

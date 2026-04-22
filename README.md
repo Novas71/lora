@@ -5,6 +5,21 @@ MVP projekt pro hardware **XIAO ESP32S3 + Wio-SX1262 Kit**:
 - `gateway node` firmware: přijme LoRa pakety a publikuje je přímo do MQTT pro Home Assistant.
 - `bridge` (Python): volitelná alternativa pro serial -> MQTT.
 
+## Protokol
+
+Uplink protokol je nově **obecný**:
+- všechny nody používají stejný packet header
+- payload tvoří seznam metrik `metric_id + value`
+- různé typy node se liší jen tím, které metriky do packetu vloží
+
+To znamená, že pro nový typ node už typicky není potřeba zavádět nový binární packet, ale jen nové `metric_id` a jejich mapování v gateway.
+
+LoRa transport mezi node a gateway je šifrovaný symetricky přes AES-CTR obálku.
+Nastavení klíče je v [firmware/include/lora_config.h](firmware/include/lora_config.h):
+- `LORA_AES_KEY_HEX` (32 hex znaků = 16 bajtů)
+- hodnota musí být **stejná** na gateway i všech node
+- výchozí hodnota je pouze placeholder pro vývoj, před produkcí ji změň
+
 ## Struktura
 
 - `firmware/` PlatformIO projekt pro ESP32S3 (`sensor` a `gateway` env)
@@ -113,11 +128,13 @@ Gateway poslouchá topic:
 Podporované JSON příkazy:
 - `{"cmd":"ping"}`
 - `{"cmd":"reboot"}`
-- `{"cmd":"set_interval","sec":300}`
+- `{"cmd":"set_param","param":"tx_interval_sec","value":300}`
 - `{"cmd":"enter_ota","sec":300}`
-- `{"cmd":"set_tank_area","area_m2":1.25}`
-- `{"cmd":"set_tank_min_mm","min_mm":250}`
-- `{"cmd":"set_tank_max_mm","max_mm":1900}`
+- `{"cmd":"set_param","param":"tank_area_m2","value":1.25}`
+- `{"cmd":"set_param","param":"tank_distance_min_mm","value":250}`
+- `{"cmd":"set_param","param":"tank_distance_max_mm","value":1900}`
+
+Legacy aliasy (`set_interval`, `set_tank_*`) jsou stále akceptované kvůli zpětné kompatibilitě.
 
 Poznámka:
 - konfigurace nádrže se uloží do NVS v distance node a zůstane zachovaná po restartu/deep sleep.
@@ -126,7 +143,7 @@ Node vrací ACK do:
 - `lora2ha/node/<node_id>/ack`
 
 ACK payload obsahuje:
-- `acked_fcnt`, `cmd`, `status`, `interval_sec`, `rssi`, `snr`
+- `acked_fcnt`, `op`, `param`, `status`, `interval_sec`, `rssi`, `snr`
 
 `status` kódy:
 - `0` OK
