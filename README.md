@@ -14,6 +14,61 @@ Uplink protokol je nově **obecný**:
 
 To znamená, že pro nový typ node už typicky není potřeba zavádět nový binární packet, ale jen nové `metric_id` a jejich mapování v gateway.
 
+## Zigbee-like F1 (join + short address + interview)
+
+Firmware nyní obsahuje první vrstvu Zigbee-like chování:
+- node po startu odešle `JOIN_REQUEST`
+- gateway přidělí per-node `short_addr` (16-bit, uložené v NVS gateway)
+- gateway vrátí `JOIN_RESPONSE`
+- node odešle `INTERVIEW_REPORT` (device type + metriky + interval)
+
+MQTT výstupy:
+- `lora2ha/node/<node_id>/join`
+- `lora2ha/node/<node_id>/interview`
+
+Ve standardním `state/status` payloadu je navíc `short_addr`.
+
+## Zigbee-like F2 (cluster / attribute)
+
+Druhá vrstva přidává `cluster/attribute` model:
+- gateway umí poslat `read_attr` / `write_attr`
+- node vrací binární packet `ATTR_REPORT` (na čtení i po úspěšném zápisu)
+- kompatibilita s původním `set_param` zůstává
+
+MQTT příklady:
+- `{"cmd":"read_attr","cluster":1024,"attr":2}` (temperature)
+- `{"cmd":"write_attr","cluster":61440,"attr":4097,"value":300}` (`tx_interval_sec`)
+
+Poznámka:
+- `cluster` a `attr` jsou nyní numerická ID podle [docs/payload.md](docs/payload.md).
+- názvy `read_attr` / `write_attr` jsou MQTT `cmd`; `ATTR_REPORT` je název binárního packetu.
+- kompletní autoritativní mapa `cluster/attribute` ID je v sekci **Attribute IDs (autorita)** v [docs/payload.md](docs/payload.md).
+
+## Zigbee-like F3 (reporting + bind + group)
+
+F3 je implementováno v gateway logice:
+- group membership pro nody
+- multicast příkazy na skupinu (`.../group/<name>/set`)
+- bind pravidla `src attr -> dst write_attr` s `scale` a `offset`
+
+Příklady:
+- `{"cmd":"group_add","group":"tank"}` na `.../node/<node>/set`
+- `{"cmd":"read_attr","cluster":1024,"attr":2}` na `.../group/tank/set`
+- `{"cmd":"bind_attr","src_cluster":1280,"src_attr":17,"dst_node":2002,"dst_cluster":61440,"dst_attr":4097,"scale":1.0,"offset":0}`
+
+F3 quick start (3 kroky):
+1. Přidej nody do group `tank`:
+	- pošli `{"cmd":"group_add","group":"tank"}` na `lora2ha/node/2001/set`
+	- pošli `{"cmd":"group_add","group":"tank"}` na `lora2ha/node/2002/set`
+2. Ověř group multicast:
+	- pošli `{"cmd":"write_attr","cluster":61440,"attr":4097,"value":300}` na `lora2ha/group/tank/set`
+3. Přidej bind pravidlo (automatická propagace reportů):
+	- pošli `{"cmd":"bind_attr","src_cluster":1280,"src_attr":17,"dst_node":2002,"dst_cluster":61440,"dst_attr":4097,"scale":1.0,"offset":0}` na `lora2ha/node/2001/set`
+
+Debug/status topicy:
+- `.../node/<node_id>/groups`
+- `.../node/<node_id>/bindings`
+
 LoRa transport mezi node a gateway je šifrovaný symetricky přes AES-CTR obálku.
 Nastavení klíče je v [firmware/include/lora_config.h](firmware/include/lora_config.h):
 - `LORA_AES_KEY_HEX` (32 hex znaků = 16 bajtů)
@@ -32,6 +87,17 @@ Nastaveno podle Meshtastic varianty `seeed_xiao_s3`:
 - `CS=41`, `RST=42`, `DIO1=39`, `BUSY=40`
 
 Pokud by u tvé revize neseděly piny, přepiš je v `firmware/include/lora_config.h`.
+
+## Měření baterie (reálný ADC)
+
+Oba nody teď používají skutečné ADC měření baterie (žádný placeholder):
+- `SENSOR_BATTERY_ADC_PIN`, `DISTANCE_BATTERY_ADC_PIN`
+- `SENSOR_BATTERY_DIVIDER_RATIO`, `DISTANCE_BATTERY_DIVIDER_RATIO`
+- `BATTERY_ADC_SAMPLES`
+- `SENSOR_LOW_BATTERY_MV`, `DISTANCE_LOW_BATTERY_MV`
+
+Pro běžný odporový dělič 1:1 nech `*_DIVIDER_RATIO=2.0`.
+Pokud používáš jiný dělič, uprav poměr podle HW.
 
 ## 0) První spuštění gateway (captive portal)
 
@@ -112,6 +178,7 @@ U distance node se vytvoří a plní zejména:
 - `level_cm` (výška hladiny)
 - `water_l` (vypočtený objem vody)
 - `battery`, `rssi`, `snr`
+- `low_battery` (binary sensor)
 
 Topicy:
 - `lora2ha/node/<node_id>/state`
@@ -222,6 +289,7 @@ Co obsahuje:
 - `input_number.lora_target_interval_sec`
 - skripty `script.lora_ping_node`, `script.lora_reboot_node`, `script.lora_set_interval_node`
 - ACK notifikaci přes `persistent_notification`
+- low-battery notifikaci přes `persistent_notification` (trigger z `lora2ha/node/+/state`)
 
 Zapnutí package v Home Assistantu (`configuration.yaml`):
 

@@ -11,6 +11,56 @@ enum MessageType : uint8_t {
   MSG_DISTANCE = 0x04,
   MSG_DOWNLINK_CMD = 0x10,
   MSG_ACK = 0x11,
+  MSG_JOIN_REQUEST = 0x20,
+  MSG_JOIN_RESPONSE = 0x21,
+  MSG_INTERVIEW_REPORT = 0x22,
+  MSG_ATTR_COMMAND = 0x30,
+  MSG_ATTR_REPORT = 0x31,
+};
+
+enum DeviceType : uint8_t {
+  DEVICE_TYPE_SENSOR = 0x01,
+  DEVICE_TYPE_DISTANCE = 0x02,
+};
+
+enum JoinCapability : uint32_t {
+  CAP_TELEMETRY = 0x00000001,
+  CAP_DOWNLINK = 0x00000002,
+  CAP_OTA = 0x00000004,
+  CAP_BATTERY_ADC = 0x00000008,
+};
+
+enum JoinStatus : uint8_t {
+  JOIN_OK = 0x00,
+  JOIN_DENIED = 0x01,
+};
+
+enum AttrCommandType : uint8_t {
+  ATTR_CMD_READ = 0x01,
+  ATTR_CMD_WRITE = 0x02,
+};
+
+enum ClusterId : uint16_t {
+  CLUSTER_POWER = 0x0001,
+  CLUSTER_ENVIRONMENT = 0x0400,
+  CLUSTER_WATER_TANK = 0x0500,
+  CLUSTER_SYSTEM = 0xF000,
+};
+
+enum AttributeId : uint16_t {
+  ATTR_BATTERY_MV = 0x0001,
+  ATTR_TEMPERATURE_C_X100 = 0x0002,
+  ATTR_HUMIDITY_RH_X100 = 0x0003,
+  ATTR_PRESSURE_HPA_X10 = 0x0004,
+
+  ATTR_DISTANCE_MM = 0x0010,
+  ATTR_LEVEL_MM = 0x0011,
+  ATTR_WATER_L_X10 = 0x0012,
+
+  ATTR_TX_INTERVAL_SEC = 0x1001,
+  ATTR_TANK_AREA_M2_X1000 = 0x1101,
+  ATTR_TANK_DISTANCE_MIN_MM = 0x1102,
+  ATTR_TANK_DISTANCE_MAX_MM = 0x1103,
 };
 
 enum MetricId : uint8_t {
@@ -42,6 +92,11 @@ enum AckStatus : uint8_t {
   ACK_OK = 0x00,
   ACK_UNSUPPORTED_CMD = 0x01,
   ACK_INVALID_VALUE = 0x02,
+};
+
+enum PacketFlags : uint8_t {
+  FLAG_LOW_BATTERY = 0x01,
+  FLAG_MEASUREMENT_FAIL = 0x02,
 };
 
 #pragma pack(push, 1)
@@ -80,6 +135,61 @@ struct AckPacketV1 {
   uint16_t acked_parameter_id;
   uint8_t status;
   uint32_t current_interval_sec;
+  uint16_t crc16;
+};
+
+struct JoinRequestV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint8_t device_type;
+  uint32_t capabilities;
+  uint16_t fw_version;
+  uint16_t crc16;
+};
+
+struct JoinResponseV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint16_t short_addr;
+  uint16_t network_id;
+  uint8_t status;
+  uint16_t crc16;
+};
+
+struct InterviewReportV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint16_t short_addr;
+  uint8_t device_type;
+  uint32_t metric_bitmap;
+  uint32_t current_interval_sec;
+  uint16_t crc16;
+};
+
+struct AttrCommandPacketV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint32_t target_frame_counter;
+  uint8_t command_type;
+  uint16_t cluster_id;
+  uint16_t attribute_id;
+  int32_t value_i32;
+  uint16_t crc16;
+};
+
+struct AttrReportPacketV1 {
+  uint8_t proto_ver;
+  uint8_t msg_type;
+  uint32_t node_id;
+  uint16_t short_addr;
+  uint16_t cluster_id;
+  uint16_t attribute_id;
+  int32_t value_i32;
+  uint8_t flags;
   uint16_t crc16;
 };
 #pragma pack(pop)

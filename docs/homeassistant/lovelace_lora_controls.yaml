@@ -17,6 +17,28 @@ cards:
         name: Tank min distance (mm)
       - entity: input_number.lora_tank_max_mm
         name: Tank max distance (mm)
+      - entity: input_number.lora_attr_cluster_id
+        name: Attr cluster ID
+      - entity: input_number.lora_attr_id
+        name: Attr ID
+      - entity: input_number.lora_attr_value
+        name: Attr value (int32)
+      - entity: input_text.lora_group_name
+        name: Group name
+      - entity: input_number.lora_bind_src_cluster
+        name: Bind src cluster
+      - entity: input_number.lora_bind_src_attr
+        name: Bind src attr
+      - entity: input_number.lora_bind_dst_node
+        name: Bind dst node
+      - entity: input_number.lora_bind_dst_cluster
+        name: Bind dst cluster
+      - entity: input_number.lora_bind_dst_attr
+        name: Bind dst attr
+      - entity: input_number.lora_bind_scale
+        name: Bind scale
+      - entity: input_number.lora_bind_offset
+        name: Bind offset
 
   - type: horizontal-stack
     cards:
@@ -66,6 +88,139 @@ cards:
         tap_action:
           action: call-service
           service: script.lora_set_tank_max_mm
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Read Attr
+        icon: mdi:database-search
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_node
+      - type: button
+        name: Write Attr
+        icon: mdi:database-edit
+        tap_action:
+          action: call-service
+          service: script.lora_attr_write_node
+      - type: button
+        name: Read Temp Attr
+        icon: mdi:thermometer-lines
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_temperature
+
+  - type: button
+    name: Write Interval Attr
+    icon: mdi:timer-cog-outline
+    tap_action:
+      action: call-service
+      service: script.lora_attr_write_interval
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Read Tank Attrs
+        icon: mdi:database-search
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_tank_area
+      - type: button
+        name: Read Tank Min
+        icon: mdi:arrow-collapse-down
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_tank_min
+      - type: button
+        name: Read Tank Max
+        icon: mdi:arrow-collapse-up
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_tank_max
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Write Tank Area Attr
+        icon: mdi:vector-square-edit
+        tap_action:
+          action: call-service
+          service: script.lora_attr_write_tank_area
+      - type: button
+        name: Write Tank Min Attr
+        icon: mdi:arrow-collapse-down
+        tap_action:
+          action: call-service
+          service: script.lora_attr_write_tank_min
+      - type: button
+        name: Write Tank Max Attr
+        icon: mdi:arrow-collapse-up
+        tap_action:
+          action: call-service
+          service: script.lora_attr_write_tank_max
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Group Add
+        icon: mdi:account-multiple-plus
+        tap_action:
+          action: call-service
+          service: script.lora_group_add_node
+      - type: button
+        name: Group Remove
+        icon: mdi:account-multiple-remove
+        tap_action:
+          action: call-service
+          service: script.lora_group_remove_node
+      - type: button
+        name: Group List
+        icon: mdi:format-list-bulleted
+        tap_action:
+          action: call-service
+          service: script.lora_group_list_node
+      - type: button
+        name: Group Clear
+        icon: mdi:broom
+        tap_action:
+          action: call-service
+          service: script.lora_group_clear_node
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Group Read Attr
+        icon: mdi:database-search
+        tap_action:
+          action: call-service
+          service: script.lora_attr_read_group
+      - type: button
+        name: Group Write Attr
+        icon: mdi:database-edit
+        tap_action:
+          action: call-service
+          service: script.lora_attr_write_group
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Bind Add
+        icon: mdi:link-plus
+        tap_action:
+          action: call-service
+          service: script.lora_bind_attr_add
+      - type: button
+        name: Bind Remove
+        icon: mdi:link-off
+        tap_action:
+          action: call-service
+          service: script.lora_bind_attr_remove
+      - type: button
+        name: Bind List
+        icon: mdi:link-variant
+        tap_action:
+          action: call-service
+          service: script.lora_bind_attr_list
 
   - type: entities
     title: Tank Metrics (example node 2001)

@@ -1,8 +1,14 @@
+# LoRa F2 ID reference: see docs/payload.md -> "Attribute IDs (autorita)"
+
 input_text:
   lora_target_node_id:
     name: LoRa Target Node ID
     initial: "2001"
     max: 10
+  lora_group_name:
+    name: LoRa Group Name
+    initial: "tank"
+    max: 24
 
 input_number:
   lora_target_interval_sec:
@@ -40,6 +46,76 @@ input_number:
     step: 10
     mode: box
     initial: 2000
+  lora_attr_cluster_id:
+    name: LoRa Attr Cluster ID
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 61440
+  lora_attr_id:
+    name: LoRa Attr ID
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 4097
+  lora_attr_value:
+    name: LoRa Attr Value (int32)
+    min: -2147483648
+    max: 2147483647
+    step: 1
+    mode: box
+    initial: 300
+  lora_bind_src_cluster:
+    name: LoRa Bind Src Cluster
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 1280
+  lora_bind_src_attr:
+    name: LoRa Bind Src Attr
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 17
+  lora_bind_dst_node:
+    name: LoRa Bind Dst Node
+    min: 1
+    max: 4294967295
+    step: 1
+    mode: box
+    initial: 2001
+  lora_bind_dst_cluster:
+    name: LoRa Bind Dst Cluster
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 61440
+  lora_bind_dst_attr:
+    name: LoRa Bind Dst Attr
+    min: 1
+    max: 65535
+    step: 1
+    mode: box
+    initial: 4097
+  lora_bind_scale:
+    name: LoRa Bind Scale
+    min: -1000
+    max: 1000
+    step: 0.01
+    mode: box
+    initial: 1
+  lora_bind_offset:
+    name: LoRa Bind Offset
+    min: -2147483648
+    max: 2147483647
+    step: 1
+    mode: box
+    initial: 0
 
 script:
   lora_ping_node:
@@ -115,6 +191,220 @@ script:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
           payload: "{{ {'cmd':'set_param','param':'tank_distance_max_mm','value': max_mm} | tojson }}"
 
+  lora_attr_read_node:
+    alias: LoRa Read Attr
+    mode: single
+    sequence:
+      - variables:
+          cluster: "{{ states('input_number.lora_attr_cluster_id') | int(61440) }}"
+          attr: "{{ states('input_number.lora_attr_id') | int(4097) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': cluster,'attr': attr} | tojson }}"
+
+  lora_attr_write_node:
+    alias: LoRa Write Attr
+    mode: single
+    sequence:
+      - variables:
+          cluster: "{{ states('input_number.lora_attr_cluster_id') | int(61440) }}"
+          attr: "{{ states('input_number.lora_attr_id') | int(4097) }}"
+          value: "{{ states('input_number.lora_attr_value') | int(300) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': cluster,'attr': attr,'value': value} | tojson }}"
+
+  lora_attr_read_temperature:
+    alias: LoRa Read Temperature Attr
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': 1024,'attr': 2} | tojson }}"
+
+  lora_attr_write_interval:
+    alias: LoRa Write Interval Attr
+    mode: single
+    sequence:
+      - variables:
+          sec: "{{ states('input_number.lora_target_interval_sec') | int(300) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': 61440,'attr': 4097,'value': sec} | tojson }}"
+
+  lora_attr_read_tank_area:
+    alias: LoRa Read Tank Area Attr
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': 1280,'attr': 4353} | tojson }}"
+
+  lora_attr_read_tank_min:
+    alias: LoRa Read Tank Min Attr
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': 1280,'attr': 4354} | tojson }}"
+
+  lora_attr_read_tank_max:
+    alias: LoRa Read Tank Max Attr
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': 1280,'attr': 4355} | tojson }}"
+
+  lora_attr_write_tank_area:
+    alias: LoRa Write Tank Area Attr
+    mode: single
+    sequence:
+      - variables:
+          area_m2: "{{ states('input_number.lora_tank_area_m2') | float(1.0) }}"
+          area_x1000: "{{ (area_m2 * 1000) | round(0) | int(1000) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': 1280,'attr': 4353,'value': area_x1000} | tojson }}"
+
+  lora_attr_write_tank_min:
+    alias: LoRa Write Tank Min Attr
+    mode: single
+    sequence:
+      - variables:
+          min_mm: "{{ states('input_number.lora_tank_min_mm') | int(200) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': 1280,'attr': 4354,'value': min_mm} | tojson }}"
+
+  lora_attr_write_tank_max:
+    alias: LoRa Write Tank Max Attr
+    mode: single
+    sequence:
+      - variables:
+          max_mm: "{{ states('input_number.lora_tank_max_mm') | int(2000) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': 1280,'attr': 4355,'value': max_mm} | tojson }}"
+
+  lora_group_add_node:
+    alias: LoRa Group Add Node
+    mode: single
+    sequence:
+      - variables:
+          group_name: "{{ states('input_text.lora_group_name') | lower }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'group_add','group': group_name} | tojson }}"
+
+  lora_group_remove_node:
+    alias: LoRa Group Remove Node
+    mode: single
+    sequence:
+      - variables:
+          group_name: "{{ states('input_text.lora_group_name') | lower }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'group_remove','group': group_name} | tojson }}"
+
+  lora_group_list_node:
+    alias: LoRa Group List Node
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'group_list'} | tojson }}"
+
+  lora_group_clear_node:
+    alias: LoRa Group Clear Node
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'group_clear'} | tojson }}"
+
+  lora_attr_read_group:
+    alias: LoRa Group Read Attr
+    mode: single
+    sequence:
+      - variables:
+          group_name: "{{ states('input_text.lora_group_name') | lower }}"
+          cluster: "{{ states('input_number.lora_attr_cluster_id') | int(61440) }}"
+          attr: "{{ states('input_number.lora_attr_id') | int(4097) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/group/{{ group_name }}/set"
+          payload: "{{ {'cmd':'read_attr','cluster': cluster,'attr': attr} | tojson }}"
+
+  lora_attr_write_group:
+    alias: LoRa Group Write Attr
+    mode: single
+    sequence:
+      - variables:
+          group_name: "{{ states('input_text.lora_group_name') | lower }}"
+          cluster: "{{ states('input_number.lora_attr_cluster_id') | int(61440) }}"
+          attr: "{{ states('input_number.lora_attr_id') | int(4097) }}"
+          value: "{{ states('input_number.lora_attr_value') | int(300) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/group/{{ group_name }}/set"
+          payload: "{{ {'cmd':'write_attr','cluster': cluster,'attr': attr,'value': value} | tojson }}"
+
+  lora_bind_attr_add:
+    alias: LoRa Bind Attr Add
+    mode: single
+    sequence:
+      - variables:
+          src_cluster: "{{ states('input_number.lora_bind_src_cluster') | int(1280) }}"
+          src_attr: "{{ states('input_number.lora_bind_src_attr') | int(17) }}"
+          dst_node: "{{ states('input_number.lora_bind_dst_node') | int(2001) }}"
+          dst_cluster: "{{ states('input_number.lora_bind_dst_cluster') | int(61440) }}"
+          dst_attr: "{{ states('input_number.lora_bind_dst_attr') | int(4097) }}"
+          scale: "{{ states('input_number.lora_bind_scale') | float(1.0) }}"
+          offset: "{{ states('input_number.lora_bind_offset') | int(0) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'bind_attr','src_cluster': src_cluster,'src_attr': src_attr,'dst_node': dst_node,'dst_cluster': dst_cluster,'dst_attr': dst_attr,'scale': scale,'offset': offset} | tojson }}"
+
+  lora_bind_attr_remove:
+    alias: LoRa Bind Attr Remove
+    mode: single
+    sequence:
+      - variables:
+          src_cluster: "{{ states('input_number.lora_bind_src_cluster') | int(1280) }}"
+          src_attr: "{{ states('input_number.lora_bind_src_attr') | int(17) }}"
+          dst_node: "{{ states('input_number.lora_bind_dst_node') | int(2001) }}"
+          dst_cluster: "{{ states('input_number.lora_bind_dst_cluster') | int(61440) }}"
+          dst_attr: "{{ states('input_number.lora_bind_dst_attr') | int(4097) }}"
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'unbind_attr','src_cluster': src_cluster,'src_attr': src_attr,'dst_node': dst_node,'dst_cluster': dst_cluster,'dst_attr': dst_attr} | tojson }}"
+
+  lora_bind_attr_list:
+    alias: LoRa Bind Attr List
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'bind_list'} | tojson }}"
+
 mqtt:
   sensor:
     - name: "LoRa Last ACK"
@@ -142,3 +432,23 @@ automation:
         data:
           title: "LoRa ACK node {{ node_id }}"
           message: "op={{ op }}, param={{ param }}, status={{ status }}, interval={{ interval_sec }}s"
+
+  - id: lora_low_battery_notification
+    alias: LoRa Low Battery Notification
+    mode: queued
+    trigger:
+      - platform: mqtt
+        topic: "lora2ha/node/+/state"
+    condition:
+      - condition: template
+        value_template: "{{ trigger.payload_json.low_battery | default(false) }}"
+    action:
+      - variables:
+          data: "{{ trigger.payload_json if trigger.payload_json is defined else {} }}"
+          node_id: "{{ trigger.topic.split('/')[2] if trigger.topic is defined else 'unknown' }}"
+          battery_v: "{{ data.battery | default('n/a') }}"
+      - service: persistent_notification.create
+        data:
+          notification_id: "lora_low_battery_{{ node_id }}"
+          title: "LoRa low battery node {{ node_id }}"
+          message: "Battery is low ({{ battery_v }} V). Recharge or replace battery."
