@@ -1,7 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <mbedtls/aes.h>
+#include <mbedtls/gcm.h>
 #include <esp_system.h>
 
 #include "lora_config.h"
@@ -9,10 +9,11 @@
 namespace lora_app {
 
 constexpr uint8_t SECURE_FRAME_MAGIC = 0xA5;
-constexpr uint8_t SECURE_FRAME_VERSION = 0x01;
+constexpr uint8_t SECURE_FRAME_VERSION = 0x02;
 constexpr size_t SECURE_AES_KEY_SIZE = 16;
-constexpr size_t SECURE_IV_SIZE = 16;
-constexpr size_t SECURE_HEADER_SIZE = 4 + SECURE_IV_SIZE;
+constexpr size_t SECURE_NONCE_SIZE = 12;
+constexpr size_t SECURE_TAG_SIZE = 16;
+constexpr size_t SECURE_HEADER_SIZE = 4 + SECURE_NONCE_SIZE;
 constexpr size_t SECURE_MAX_FRAME_SIZE = 128;
 
 inline bool secure_hex_nibble(char c, uint8_t &nibble) {
@@ -63,28 +64,58 @@ inline bool secure_get_key(uint8_t key[SECURE_AES_KEY_SIZE]) {
   return true;
 }
 
-inline bool secure_ctr_crypt(const uint8_t *input, size_t inputLen, const uint8_t iv[SECURE_IV_SIZE], uint8_t *output) {
+inline bool secure_gcm_encrypt(const uint8_t *plain, size_t plainLen, const uint8_t nonce[SECURE_NONCE_SIZE],
+                               const uint8_t *aad, size_t aadLen, uint8_t *cipherOut,
+                               uint8_t tagOut[SECURE_TAG_SIZE]) {
   uint8_t key[SECURE_AES_KEY_SIZE]{};
   if (!secure_get_key(key)) {
     return false;
   }
 
-  mbedtls_aes_context aes;
-  mbedtls_aes_init(&aes);
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
 
-  int rc = mbedtls_aes_setkey_enc(&aes, key, SECURE_AES_KEY_SIZE * 8);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, SECURE_AES_KEY_SIZE * 8);
   if (rc != 0) {
-    mbedtls_aes_free(&aes);
+    mbedtls_gcm_free(&gcm);
     return false;
   }
 
-  uint8_t nonceCounter[SECURE_IV_SIZE]{};
-  memcpy(nonceCounter, iv, SECURE_IV_SIZE);
-  uint8_t streamBlock[16]{};
-  size_t offset = 0;
+  rc = mbedtls_gcm_crypt_and_tag(&gcm,
+                                 MBEDTLS_GCM_ENCRYPT,
+                                 plainLen,
+                                 nonce,
+                                 SECURE_NONCE_SIZE,
+                                 aad,
+                                 aadLen,
+                                 plain,
+                                 cipherOut,
+                                 SECURE_TAG_SIZE,
+                                 tagOut);
+  mbedtls_gcm_free(&gcm);
+  return rc == 0;
+}
 
-  rc = mbedtls_aes_crypt_ctr(&aes, inputLen, &offset, nonceCounter, streamBlock, input, output);
-  mbedtls_aes_free(&aes);
+inline bool secure_gcm_decrypt(const uint8_t *cipher, size_t cipherLen, const uint8_t nonce[SECURE_NONCE_SIZE],
+                               const uint8_t *aad, size_t aadLen, const uint8_t tag[SECURE_TAG_SIZE],
+                               uint8_t *plainOut) {
+  uint8_t key[SECURE_AES_KEY_SIZE]{};
+  if (!secure_get_key(key)) {
+    return false;
+  }
+
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, SECURE_AES_KEY_SIZE * 8);
+  if (rc != 0) {
+    mbedtls_gcm_free(&gcm);
+    return false;
+  }
+
+  rc = mbedtls_gcm_auth_decrypt(
+      &gcm, cipherLen, nonce, SECURE_NONCE_SIZE, aad, aadLen, tag, SECURE_TAG_SIZE, cipher, plainOut);
+  mbedtls_gcm_free(&gcm);
   return rc == 0;
 }
 
@@ -94,7 +125,7 @@ inline bool secure_encrypt_frame(const uint8_t *plain, size_t plainLen, uint8_t 
     return false;
   }
 
-  const size_t frameLen = SECURE_HEADER_SIZE + plainLen;
+  const size_t frameLen = SECURE_HEADER_SIZE + plainLen + SECURE_TAG_SIZE;
   if (frameLen > outCapacity || frameLen > SECURE_MAX_FRAME_SIZE) {
     return false;
   }
@@ -104,11 +135,12 @@ inline bool secure_encrypt_frame(const uint8_t *plain, size_t plainLen, uint8_t 
   out[2] = static_cast<uint8_t>(plainLen & 0xFF);
   out[3] = static_cast<uint8_t>((plainLen >> 8) & 0xFF);
 
-  uint8_t *iv = out + 4;
-  esp_fill_random(iv, SECURE_IV_SIZE);
+  uint8_t *nonce = out + 4;
+  esp_fill_random(nonce, SECURE_NONCE_SIZE);
 
   uint8_t *cipher = out + SECURE_HEADER_SIZE;
-  if (!secure_ctr_crypt(plain, plainLen, iv, cipher)) {
+  uint8_t *tag = cipher + plainLen;
+  if (!secure_gcm_encrypt(plain, plainLen, nonce, out, 4, cipher, tag)) {
     return false;
   }
 
@@ -118,7 +150,7 @@ inline bool secure_encrypt_frame(const uint8_t *plain, size_t plainLen, uint8_t 
 
 inline bool secure_decrypt_frame(const uint8_t *in, size_t inLen, uint8_t *plainOut, size_t plainCapacity, size_t &plainLen) {
   plainLen = 0;
-  if (in == nullptr || plainOut == nullptr || inLen < SECURE_HEADER_SIZE) {
+  if (in == nullptr || plainOut == nullptr || inLen < (SECURE_HEADER_SIZE + SECURE_TAG_SIZE)) {
     return false;
   }
 
@@ -131,13 +163,15 @@ inline bool secure_decrypt_frame(const uint8_t *in, size_t inLen, uint8_t *plain
     return false;
   }
 
-  if (SECURE_HEADER_SIZE + payloadLen != inLen) {
+  if (SECURE_HEADER_SIZE + payloadLen + SECURE_TAG_SIZE != inLen) {
     return false;
   }
 
-  const uint8_t *iv = in + 4;
+  const uint8_t *nonce = in + 4;
   const uint8_t *cipher = in + SECURE_HEADER_SIZE;
-  if (!secure_ctr_crypt(cipher, payloadLen, iv, plainOut)) {
+  const uint8_t *tag = cipher + payloadLen;
+  if (!secure_gcm_decrypt(cipher, payloadLen, nonce, in, 4, tag, plainOut)) {
+    memset(plainOut, 0, plainCapacity);
     return false;
   }
 

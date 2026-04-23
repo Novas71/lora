@@ -218,6 +218,37 @@ struct BindRuleEntry {
   int32_t offset;
 };
 
+struct NodeConfigEntry {
+  bool inUse;
+  uint32_t nodeId;
+  uint8_t deviceType;
+  bool hasDeviceType;
+  uint32_t intervalSec;
+  bool hasIntervalSec;
+  int32_t tankAreaM2x1000;
+  bool hasTankArea;
+  int32_t tankDistanceMinMm;
+  bool hasTankDistanceMin;
+  int32_t tankDistanceMaxMm;
+  bool hasTankDistanceMax;
+};
+
+struct NodeLivenessEntry {
+  bool inUse;
+  uint32_t nodeId;
+  uint32_t lastSeenMillis;
+  uint32_t timeoutSec;
+  bool stale;
+  char lastSource[16];
+};
+
+struct NodeReplayEntry {
+  bool inUse;
+  bool loaded;
+  uint32_t nodeId;
+  uint32_t lastUplinkFrameCounter;
+};
+
 static PendingDownlink pendingDownlinks[32]{};
 static PendingAttrCommand pendingAttrCommands[32]{};
 static uint32_t discoveredNodes[64]{};
@@ -225,8 +256,24 @@ static size_t discoveredNodeCount = 0;
 static NodeAddressEntry nodeAddressTable[64]{};
 static GroupEntry groupTable[16]{};
 static BindRuleEntry bindRuleTable[64]{};
+static NodeConfigEntry nodeConfigTable[64]{};
+static NodeLivenessEntry nodeLivenessTable[64]{};
+static NodeReplayEntry nodeReplayTable[64]{};
 
+static void safeCopy(char *dst, size_t dstLen, const char *src);
+static NodeConfigEntry *findNodeConfigEntry(uint32_t nodeId, bool createIfMissing);
+static void topicForNode(char *buffer, size_t len, uint32_t nodeId, const char *suffix);
+static void publishRetained(const char *topic, const char *payload);
 static void queueAttrCommand(uint32_t nodeId, uint8_t commandType, uint16_t clusterId, uint16_t attributeId, int32_t value);
+static void publishNodeConfigMqtt(uint32_t nodeId);
+static void publishDiscoveryReportConfigSensors(uint32_t nodeId);
+static void publishNodeLivenessMqtt(uint32_t nodeId, const char *eventName);
+static void publishDiscoveryLivenessEntities(uint32_t nodeId);
+
+constexpr uint32_t NODE_LIVENESS_UNKNOWN_TIMEOUT_SEC = 1800;
+constexpr uint32_t NODE_LIVENESS_MIN_TIMEOUT_SEC = 120;
+constexpr uint32_t NODE_LIVENESS_MAX_TIMEOUT_SEC = 172800;
+constexpr uint32_t NODE_LIVENESS_SWEEP_MS = 60000;
 
 #if defined(ESP8266) || defined(ESP32)
 ICACHE_RAM_ATTR
@@ -267,6 +314,253 @@ static void markNodeDiscovered(uint32_t nodeId) {
     return;
   }
   discoveredNodes[discoveredNodeCount++] = nodeId;
+}
+
+static void replayCounterKeyForNode(uint32_t nodeId, char *buffer, size_t len) {
+  snprintf(buffer, len, "rf_%08lX", static_cast<unsigned long>(nodeId));
+}
+
+static NodeReplayEntry *findNodeReplayEntry(uint32_t nodeId, bool createIfMissing) {
+  NodeReplayEntry *freeSlot = nullptr;
+  for (size_t i = 0; i < (sizeof(nodeReplayTable) / sizeof(nodeReplayTable[0])); i++) {
+    NodeReplayEntry &entry = nodeReplayTable[i];
+    if (entry.inUse && entry.nodeId == nodeId) {
+      return &entry;
+    }
+    if (!entry.inUse && freeSlot == nullptr) {
+      freeSlot = &entry;
+    }
+  }
+
+  if (createIfMissing && freeSlot != nullptr) {
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->inUse = true;
+    freeSlot->nodeId = nodeId;
+    return freeSlot;
+  }
+
+  return nullptr;
+}
+
+static bool acceptTelemetryFrameCounter(uint32_t nodeId, uint32_t frameCounter) {
+  NodeReplayEntry *entry = findNodeReplayEntry(nodeId, true);
+  if (entry == nullptr) {
+    return false;
+  }
+
+  if (!entry->loaded) {
+    char key[16];
+    replayCounterKeyForNode(nodeId, key, sizeof(key));
+    prefs.begin("gateway", true);
+    entry->lastUplinkFrameCounter = prefs.getULong(key, 0);
+    const bool hasStored = prefs.isKey(key);
+    prefs.end();
+    entry->loaded = true;
+    if (!hasStored) {
+      entry->lastUplinkFrameCounter = 0;
+    }
+    if (hasStored && frameCounter <= entry->lastUplinkFrameCounter) {
+      return false;
+    }
+  } else if (frameCounter <= entry->lastUplinkFrameCounter) {
+    return false;
+  }
+
+  entry->lastUplinkFrameCounter = frameCounter;
+
+  char key[16];
+  replayCounterKeyForNode(nodeId, key, sizeof(key));
+  prefs.begin("gateway", false);
+  prefs.putULong(key, frameCounter);
+  prefs.end();
+  return true;
+}
+
+static NodeLivenessEntry *findNodeLivenessEntry(uint32_t nodeId, bool createIfMissing) {
+  NodeLivenessEntry *freeSlot = nullptr;
+  for (size_t i = 0; i < (sizeof(nodeLivenessTable) / sizeof(nodeLivenessTable[0])); i++) {
+    NodeLivenessEntry &entry = nodeLivenessTable[i];
+    if (entry.inUse && entry.nodeId == nodeId) {
+      return &entry;
+    }
+    if (!entry.inUse && freeSlot == nullptr) {
+      freeSlot = &entry;
+    }
+  }
+
+  if (createIfMissing && freeSlot != nullptr) {
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->inUse = true;
+    freeSlot->nodeId = nodeId;
+    freeSlot->timeoutSec = NODE_LIVENESS_UNKNOWN_TIMEOUT_SEC;
+    safeCopy(freeSlot->lastSource, sizeof(freeSlot->lastSource), "unknown");
+    return freeSlot;
+  }
+
+  return nullptr;
+}
+
+static uint32_t computeNodeLivenessTimeoutSec(uint32_t nodeId) {
+  const NodeConfigEntry *entry = findNodeConfigEntry(nodeId, false);
+  if (entry == nullptr || !entry->hasIntervalSec || entry->intervalSec == 0) {
+    return NODE_LIVENESS_UNKNOWN_TIMEOUT_SEC;
+  }
+
+  uint64_t timeout = 0;
+  if (entry->intervalSec <= 60) {
+    timeout = static_cast<uint64_t>(entry->intervalSec) * 4ULL;
+  } else {
+    timeout = static_cast<uint64_t>(entry->intervalSec) * 3ULL;
+  }
+  if (timeout < NODE_LIVENESS_MIN_TIMEOUT_SEC) {
+    timeout = NODE_LIVENESS_MIN_TIMEOUT_SEC;
+  }
+  if (timeout > NODE_LIVENESS_MAX_TIMEOUT_SEC) {
+    timeout = NODE_LIVENESS_MAX_TIMEOUT_SEC;
+  }
+  return static_cast<uint32_t>(timeout);
+}
+
+static void updateNodeLivenessTimeout(uint32_t nodeId) {
+  NodeLivenessEntry *entry = findNodeLivenessEntry(nodeId, false);
+  if (entry == nullptr) {
+    return;
+  }
+  entry->timeoutSec = computeNodeLivenessTimeoutSec(nodeId);
+}
+
+static void markNodeSeen(uint32_t nodeId, const char *source) {
+  markNodeDiscovered(nodeId);
+
+  NodeLivenessEntry *entry = findNodeLivenessEntry(nodeId, true);
+  if (entry == nullptr) {
+    return;
+  }
+
+  const bool wasStale = entry->stale;
+  entry->lastSeenMillis = millis();
+  entry->timeoutSec = computeNodeLivenessTimeoutSec(nodeId);
+  entry->stale = false;
+  safeCopy(entry->lastSource, sizeof(entry->lastSource), source == nullptr ? "unknown" : source);
+
+  publishDiscoveryLivenessEntities(nodeId);
+
+  char availabilityTopic[128];
+  topicForNode(availabilityTopic, sizeof(availabilityTopic), nodeId, "availability");
+  publishRetained(availabilityTopic, "online");
+
+  publishNodeLivenessMqtt(nodeId, wasStale ? "became_online" : "seen");
+}
+
+static void refreshNodeLiveness() {
+  static uint32_t lastSweepMillis = 0;
+  const uint32_t now = millis();
+  if ((now - lastSweepMillis) < NODE_LIVENESS_SWEEP_MS) {
+    return;
+  }
+  lastSweepMillis = now;
+
+  for (size_t i = 0; i < discoveredNodeCount; i++) {
+    const uint32_t nodeId = discoveredNodes[i];
+    NodeLivenessEntry *entry = findNodeLivenessEntry(nodeId, false);
+    if (entry == nullptr || entry->lastSeenMillis == 0) {
+      continue;
+    }
+
+    entry->timeoutSec = computeNodeLivenessTimeoutSec(nodeId);
+    const uint32_t elapsedMs = now - entry->lastSeenMillis;
+    const bool staleNow = elapsedMs > (entry->timeoutSec * 1000UL);
+    if (staleNow != entry->stale) {
+      entry->stale = staleNow;
+
+      char availabilityTopic[128];
+      topicForNode(availabilityTopic, sizeof(availabilityTopic), nodeId, "availability");
+      publishRetained(availabilityTopic, staleNow ? "offline" : "online");
+      publishNodeLivenessMqtt(nodeId, staleNow ? "became_stale" : "became_online");
+    } else {
+      publishNodeLivenessMqtt(nodeId, "tick");
+    }
+  }
+}
+
+static NodeConfigEntry *findNodeConfigEntry(uint32_t nodeId, bool createIfMissing) {
+  NodeConfigEntry *freeSlot = nullptr;
+  for (size_t i = 0; i < (sizeof(nodeConfigTable) / sizeof(nodeConfigTable[0])); i++) {
+    NodeConfigEntry &entry = nodeConfigTable[i];
+    if (entry.inUse && entry.nodeId == nodeId) {
+      return &entry;
+    }
+    if (!entry.inUse && freeSlot == nullptr) {
+      freeSlot = &entry;
+    }
+  }
+
+  if (createIfMissing && freeSlot != nullptr) {
+    memset(freeSlot, 0, sizeof(*freeSlot));
+    freeSlot->inUse = true;
+    freeSlot->nodeId = nodeId;
+    return freeSlot;
+  }
+
+  return nullptr;
+}
+
+static const char *deviceTypeName(uint8_t deviceType) {
+  switch (deviceType) {
+    case DEVICE_TYPE_SENSOR:
+      return "sensor";
+    case DEVICE_TYPE_DISTANCE:
+      return "distance";
+    default:
+      return "unknown";
+  }
+}
+
+static void updateNodeConfigDeviceType(uint32_t nodeId, uint8_t deviceType) {
+  NodeConfigEntry *entry = findNodeConfigEntry(nodeId, true);
+  if (entry == nullptr) {
+    return;
+  }
+  entry->deviceType = deviceType;
+  entry->hasDeviceType = true;
+}
+
+static void updateNodeConfigInterval(uint32_t nodeId, uint32_t intervalSec) {
+  NodeConfigEntry *entry = findNodeConfigEntry(nodeId, true);
+  if (entry == nullptr) {
+    return;
+  }
+  entry->intervalSec = intervalSec;
+  entry->hasIntervalSec = true;
+  updateNodeLivenessTimeout(nodeId);
+}
+
+static void updateNodeConfigAttribute(uint32_t nodeId, uint16_t clusterId, uint16_t attributeId, int32_t value) {
+  NodeConfigEntry *entry = findNodeConfigEntry(nodeId, true);
+  if (entry == nullptr) {
+    return;
+  }
+
+  if (clusterId == CLUSTER_SYSTEM && attributeId == ATTR_TX_INTERVAL_SEC) {
+    entry->intervalSec = static_cast<uint32_t>(value);
+    entry->hasIntervalSec = true;
+    return;
+  }
+  if (clusterId == CLUSTER_WATER_TANK && attributeId == ATTR_TANK_AREA_M2_X1000) {
+    entry->tankAreaM2x1000 = value;
+    entry->hasTankArea = true;
+    return;
+  }
+  if (clusterId == CLUSTER_WATER_TANK && attributeId == ATTR_TANK_DISTANCE_MIN_MM) {
+    entry->tankDistanceMinMm = value;
+    entry->hasTankDistanceMin = true;
+    return;
+  }
+  if (clusterId == CLUSTER_WATER_TANK && attributeId == ATTR_TANK_DISTANCE_MAX_MM) {
+    entry->tankDistanceMaxMm = value;
+    entry->hasTankDistanceMax = true;
+    return;
+  }
 }
 
 static void topicForNode(char *buffer, size_t len, uint32_t nodeId, const char *suffix) {
@@ -756,6 +1050,9 @@ static void publishJoinMqtt(uint32_t nodeId, uint16_t shortAddr, uint8_t deviceT
   char joinTopic[128];
   topicForNode(joinTopic, sizeof(joinTopic), nodeId, "join");
 
+  updateNodeConfigDeviceType(nodeId, deviceType);
+  publishDiscoveryReportConfigSensors(nodeId);
+
   char payload[256];
   snprintf(payload,
            sizeof(payload),
@@ -766,11 +1063,16 @@ static void publishJoinMqtt(uint32_t nodeId, uint16_t shortAddr, uint8_t deviceT
            static_cast<unsigned long>(capabilities),
            static_cast<unsigned>(LORA_NETWORK_ID));
   publishRetained(joinTopic, payload);
+  publishNodeConfigMqtt(nodeId);
 }
 
 static void publishInterviewMqtt(const InterviewReportV1 &report, float rssi, float snr) {
   char topic[128];
   topicForNode(topic, sizeof(topic), report.node_id, "interview");
+
+  updateNodeConfigDeviceType(report.node_id, report.device_type);
+  updateNodeConfigInterval(report.node_id, report.current_interval_sec);
+  publishDiscoveryReportConfigSensors(report.node_id);
 
   char payload[320];
   snprintf(payload,
@@ -784,6 +1086,7 @@ static void publishInterviewMqtt(const InterviewReportV1 &report, float rssi, fl
            rssi,
            snr);
   publishRetained(topic, payload);
+  publishNodeConfigMqtt(report.node_id);
 }
 
 static void sendJoinResponse(uint32_t nodeId, uint16_t shortAddr) {
@@ -987,18 +1290,19 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
 
   JsonDocument doc;
   const DeserializationError err = deserializeJson(doc, payload, length);
+  String rawCmd;
   const char *cmd = nullptr;
   int32_t encodedValue = 0;
 
   if (!err) {
     cmd = doc["cmd"] | "";
   } else {
-    String raw;
+    rawCmd.reserve(length + 1);
     for (unsigned int i = 0; i < length; i++) {
-      raw += static_cast<char>(payload[i]);
+      rawCmd += static_cast<char>(payload[i]);
     }
-    raw.trim();
-    cmd = raw.c_str();
+    rawCmd.trim();
+    cmd = rawCmd.c_str();
   }
 
   uint8_t downlinkOp = 0;
@@ -1008,11 +1312,13 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
                               strcmp(cmd, "group_list") == 0)) {
     if (strcmp(cmd, "group_list") == 0) {
       publishNodeGroupsMqtt(nodeId);
+      publishNodeConfigMqtt(nodeId);
       return;
     }
     if (strcmp(cmd, "group_clear") == 0) {
       clearNodeFromAllGroups(nodeId);
       publishNodeGroupsMqtt(nodeId);
+      publishNodeConfigMqtt(nodeId);
       return;
     }
 
@@ -1030,6 +1336,7 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
       ok = removeNodeFromGroup(normalized, nodeId);
     }
     publishNodeGroupsMqtt(nodeId);
+    publishNodeConfigMqtt(nodeId);
     Serial.printf("Group cmd %s node=%lu group=%s result=%s\n",
                   cmd,
                   static_cast<unsigned long>(nodeId),
@@ -1041,6 +1348,7 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
   if (isNodeTopic && !err && (strcmp(cmd, "bind_attr") == 0 || strcmp(cmd, "unbind_attr") == 0 || strcmp(cmd, "bind_list") == 0)) {
     if (strcmp(cmd, "bind_list") == 0) {
       publishNodeBindingsMqtt(nodeId);
+      publishNodeConfigMqtt(nodeId);
       return;
     }
 
@@ -1069,6 +1377,7 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
     }
 
     publishNodeBindingsMqtt(nodeId);
+  publishNodeConfigMqtt(nodeId);
     Serial.printf("Bind cmd %s src=%lu src=%u/%u dst=%lu dst=%u/%u result=%s\n",
                   cmd,
                   static_cast<unsigned long>(rule.srcNode),
@@ -1078,6 +1387,15 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
                   rule.dstCluster,
                   rule.dstAttr,
                   ok ? "ok" : "fail");
+    return;
+  }
+
+  if (isNodeTopic && strcmp(cmd, "get_config") == 0) {
+    publishDiscoveryReportConfigSensors(nodeId);
+    publishNodeGroupsMqtt(nodeId);
+    publishNodeBindingsMqtt(nodeId);
+    publishNodeConfigMqtt(nodeId);
+    queueAttrCommand(nodeId, ATTR_CMD_READ, CLUSTER_SYSTEM, ATTR_TX_INTERVAL_SEC, 0);
     return;
   }
 
@@ -1367,6 +1685,182 @@ static void publishDiscoveryBinarySensor(uint32_t nodeId, const char *key, const
   }
 }
 
+static void publishDiscoverySensorCustom(uint32_t nodeId, const char *key, const char *name, const char *topicSuffix,
+                                         const char *valueTemplate, const char *jsonAttributesSuffix, const char *unit,
+                                         const char *deviceClass, const char *stateClass, const char *icon) {
+  char topic[128];
+  char payload[1024];
+  char stateTopic[128];
+  char attrTopic[128];
+  char optionalFields[256];
+
+  snprintf(topic, sizeof(topic), "homeassistant/sensor/lora_%lu_%s/config", static_cast<unsigned long>(nodeId), key);
+  topicForNode(stateTopic, sizeof(stateTopic), nodeId, topicSuffix);
+
+  optionalFields[0] = '\0';
+  if (jsonAttributesSuffix != nullptr && strlen(jsonAttributesSuffix) > 0) {
+    topicForNode(attrTopic, sizeof(attrTopic), nodeId, jsonAttributesSuffix);
+    strncat(optionalFields, "\"json_attributes_topic\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, attrTopic, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(unit) > 0) {
+    strncat(optionalFields, "\"unit_of_measurement\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, unit, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(deviceClass) > 0) {
+    strncat(optionalFields, "\"device_class\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, deviceClass, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(stateClass) > 0) {
+    strncat(optionalFields, "\"state_class\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, stateClass, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(icon) > 0) {
+    strncat(optionalFields, "\"icon\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, icon, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  const size_t optLen = strlen(optionalFields);
+  if (optLen > 0 && optionalFields[optLen - 1] == ',') {
+    optionalFields[optLen - 1] = '\0';
+  }
+
+  const int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"name\":\"%s\",\"unique_id\":\"lora_%lu_%s\",\"state_topic\":\"%s\","
+      "\"availability_topic\":\"%s/node/%lu/availability\",\"value_template\":\"%s\","
+      "\"device\":{\"identifiers\":[\"lora_%lu\"],\"name\":\"LoRa Node %lu\",\"manufacturer\":\"Seeed Studio\",\"model\":\"XIAO ESP32S3 + Wio-SX1262\"}%s%s}",
+      name,
+      static_cast<unsigned long>(nodeId),
+      key,
+      stateTopic,
+      config.mqttBaseTopic,
+      static_cast<unsigned long>(nodeId),
+      valueTemplate,
+      static_cast<unsigned long>(nodeId),
+      static_cast<unsigned long>(nodeId),
+      strlen(optionalFields) > 0 ? "," : "",
+      optionalFields);
+
+  if (written > 0 && written < static_cast<int>(sizeof(payload))) {
+    publishRetained(topic, payload);
+  }
+}
+
+static void publishDiscoveryBinarySensorCustom(uint32_t nodeId, const char *key, const char *name, const char *topicSuffix,
+                                               const char *valueTemplate, const char *jsonAttributesSuffix,
+                                               const char *deviceClass, const char *icon) {
+  char topic[128];
+  char payload[1024];
+  char stateTopic[128];
+  char attrTopic[128];
+  char optionalFields[256];
+
+  snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/lora_%lu_%s/config", static_cast<unsigned long>(nodeId), key);
+  topicForNode(stateTopic, sizeof(stateTopic), nodeId, topicSuffix);
+
+  optionalFields[0] = '\0';
+  if (jsonAttributesSuffix != nullptr && strlen(jsonAttributesSuffix) > 0) {
+    topicForNode(attrTopic, sizeof(attrTopic), nodeId, jsonAttributesSuffix);
+    strncat(optionalFields, "\"json_attributes_topic\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, attrTopic, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(deviceClass) > 0) {
+    strncat(optionalFields, "\"device_class\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, deviceClass, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  if (strlen(icon) > 0) {
+    strncat(optionalFields, "\"icon\":\"", sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, icon, sizeof(optionalFields) - strlen(optionalFields) - 1);
+    strncat(optionalFields, "\",", sizeof(optionalFields) - strlen(optionalFields) - 1);
+  }
+  const size_t optLen = strlen(optionalFields);
+  if (optLen > 0 && optionalFields[optLen - 1] == ',') {
+    optionalFields[optLen - 1] = '\0';
+  }
+
+  const int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"name\":\"%s\",\"unique_id\":\"lora_%lu_%s\",\"state_topic\":\"%s\","
+      "\"value_template\":\"%s\",\"payload_on\":\"true\",\"payload_off\":\"false\","
+      "\"device\":{\"identifiers\":[\"lora_%lu\"],\"name\":\"LoRa Node %lu\",\"manufacturer\":\"Seeed Studio\",\"model\":\"XIAO ESP32S3 + Wio-SX1262\"}%s%s}",
+      name,
+      static_cast<unsigned long>(nodeId),
+      key,
+      stateTopic,
+      valueTemplate,
+      static_cast<unsigned long>(nodeId),
+      static_cast<unsigned long>(nodeId),
+      strlen(optionalFields) > 0 ? "," : "",
+      optionalFields);
+
+  if (written > 0 && written < static_cast<int>(sizeof(payload))) {
+    publishRetained(topic, payload);
+  }
+}
+
+static void publishDiscoveryReportConfigSensors(uint32_t nodeId) {
+  publishDiscoverySensorCustom(nodeId,
+                               "interval_cfg",
+                               "TX interval",
+                               "report_config",
+                               "{{ value_json.interval_sec | default('') }}",
+                               "report_config",
+                               "s",
+                               "duration",
+                               "",
+                               "mdi:timer-cog-outline");
+  publishDiscoverySensorCustom(nodeId,
+                               "groups_cfg",
+                               "Groups",
+                               "report_config",
+                               "{{ value_json.groups_csv | default('') }}",
+                               "report_config",
+                               "",
+                               "",
+                               "",
+                               "mdi:account-group-outline");
+  publishDiscoverySensorCustom(nodeId,
+                               "bindings_cfg",
+                               "Bindings",
+                               "report_config",
+                               "{{ value_json.bindings_count | default(0) }}",
+                               "report_config",
+                               "",
+                               "",
+                               "",
+                               "mdi:transit-connection-variant");
+}
+
+static void publishDiscoveryLivenessEntities(uint32_t nodeId) {
+  publishDiscoverySensorCustom(nodeId,
+                               "last_seen_age_sec",
+                               "Last seen age",
+                               "liveness",
+                               "{{ value_json.last_seen_age_sec | default(0) }}",
+                               "liveness",
+                               "s",
+                               "duration",
+                               "",
+                               "mdi:clock-outline");
+  publishDiscoveryBinarySensorCustom(nodeId,
+                                     "stale",
+                                     "Node stale",
+                                     "liveness",
+                                     "{{ value_json.stale | default(false) }}",
+                                     "liveness",
+                                     "problem",
+                                     "mdi:clock-alert-outline");
+}
+
 static const char *metricKey(uint8_t metricId) {
   switch (metricId) {
     case METRIC_BATTERY_MV:
@@ -1564,6 +2058,106 @@ static void addAttributeToJson(JsonDocument &doc, uint16_t clusterId, uint16_t a
   doc[key] = value;
 }
 
+static void publishNodeConfigMqtt(uint32_t nodeId) {
+  publishDiscoveryReportConfigSensors(nodeId);
+
+  char topic[128];
+  topicForNode(topic, sizeof(topic), nodeId, "report_config");
+
+  JsonDocument doc;
+  doc["node_id"] = nodeId;
+
+  const NodeConfigEntry *entry = findNodeConfigEntry(nodeId, false);
+  if (entry != nullptr && entry->hasDeviceType) {
+    doc["device_type"] = entry->deviceType;
+    doc["device_type_name"] = deviceTypeName(entry->deviceType);
+  }
+
+  const bool hasInterval = entry != nullptr && entry->hasIntervalSec;
+  doc["interval_known"] = hasInterval;
+  if (hasInterval) {
+    doc["interval_sec"] = entry->intervalSec;
+  }
+
+  JsonArray groups = doc["groups"].to<JsonArray>();
+  String groupsCsv;
+  size_t groupCount = 0;
+  for (size_t i = 0; i < (sizeof(groupTable) / sizeof(groupTable[0])); i++) {
+    const GroupEntry &group = groupTable[i];
+    if (!group.inUse || !groupContainsNode(group, nodeId)) {
+      continue;
+    }
+    groups.add(group.name);
+    if (groupsCsv.length() > 0) {
+      groupsCsv += ",";
+    }
+    groupsCsv += group.name;
+    groupCount++;
+  }
+  doc["group_count"] = groupCount;
+  doc["groups_csv"] = groupsCsv;
+
+  JsonArray bindings = doc["bindings"].to<JsonArray>();
+  size_t bindingCount = 0;
+  for (size_t i = 0; i < (sizeof(bindRuleTable) / sizeof(bindRuleTable[0])); i++) {
+    const BindRuleEntry &rule = bindRuleTable[i];
+    if (!rule.inUse || rule.srcNode != nodeId) {
+      continue;
+    }
+    JsonObject obj = bindings.add<JsonObject>();
+    obj["src_cluster"] = rule.srcCluster;
+    obj["src_attr"] = rule.srcAttr;
+    obj["dst_node"] = rule.dstNode;
+    obj["dst_cluster"] = rule.dstCluster;
+    obj["dst_attr"] = rule.dstAttr;
+    obj["scale"] = rule.scaleX1000 / 1000.0f;
+    obj["offset"] = rule.offset;
+    bindingCount++;
+  }
+  doc["bindings_count"] = bindingCount;
+
+  if (entry != nullptr && entry->hasTankArea) {
+    doc["tank_area_m2"] = entry->tankAreaM2x1000 / 1000.0f;
+  }
+  if (entry != nullptr && entry->hasTankDistanceMin) {
+    doc["tank_distance_min_mm"] = entry->tankDistanceMinMm;
+  }
+  if (entry != nullptr && entry->hasTankDistanceMax) {
+    doc["tank_distance_max_mm"] = entry->tankDistanceMaxMm;
+  }
+
+  String payload;
+  serializeJson(doc, payload);
+  publishRetained(topic, payload.c_str());
+}
+
+static void publishNodeLivenessMqtt(uint32_t nodeId, const char *eventName) {
+  const NodeLivenessEntry *entry = findNodeLivenessEntry(nodeId, false);
+  if (entry == nullptr || entry->lastSeenMillis == 0) {
+    return;
+  }
+
+  publishDiscoveryLivenessEntities(nodeId);
+
+  char topic[128];
+  topicForNode(topic, sizeof(topic), nodeId, "liveness");
+
+  const uint32_t ageSec = (millis() - entry->lastSeenMillis) / 1000UL;
+  JsonDocument doc;
+  doc["node_id"] = nodeId;
+  doc["last_seen_age_sec"] = ageSec;
+  doc["last_seen_uptime_sec"] = entry->lastSeenMillis / 1000UL;
+  doc["timeout_sec"] = entry->timeoutSec;
+  doc["stale"] = entry->stale;
+  doc["online"] = !entry->stale;
+  doc["source"] = entry->lastSource;
+  doc["event"] = (eventName != nullptr && strlen(eventName) > 0) ? eventName : "update";
+
+  String payload;
+  serializeJson(doc, payload);
+  publishRetained(topic, payload.c_str());
+}
+
 static void publishAttrReportMqtt(const AttrReportPacketV1 &report, float rssi, float snr) {
   char stateTopic[128];
   char statusTopic[128];
@@ -1597,6 +2191,9 @@ static void publishAttrReportMqtt(const AttrReportPacketV1 &report, float rssi, 
   mqttClient.publish(statusTopic, statusPayload.c_str(), false);
   publishRetained(availabilityTopic, "online");
 
+  updateNodeConfigAttribute(report.node_id, report.cluster_id, report.attribute_id, report.value_i32);
+  publishNodeConfigMqtt(report.node_id);
+
   processBindingTriggers(report.node_id, report.cluster_id, report.attribute_id, report.value_i32);
 }
 
@@ -1613,6 +2210,7 @@ static void publishTelemetryMqtt(const MetricsPacketHeaderV1 &header, const Metr
   publishDiscoverySensor(header.node_id, "rssi", "RSSI", "dBm", "signal_strength", "measurement");
   publishDiscoverySensor(header.node_id, "snr", "SNR", "dB", "", "measurement");
   publishDiscoveryBinarySensor(header.node_id, "low_battery", "Low battery", "battery");
+  publishDiscoveryReportConfigSensors(header.node_id);
 
   JsonDocument stateDoc;
   JsonDocument statusDoc;
@@ -1660,12 +2258,14 @@ static void publishTelemetryMqtt(const MetricsPacketHeaderV1 &header, const Metr
   mqttClient.publish(stateTopic, statePayload.c_str(), false);
   mqttClient.publish(statusTopic, statusPayload.c_str(), false);
   publishRetained(availabilityTopic, "online");
+  publishNodeConfigMqtt(header.node_id);
 }
 
 static void publishAckMqtt(const AckPacketV1 &ack, float rssi, float snr) {
   char ackTopic[128];
   char ackPayload[256];
   topicForNode(ackTopic, sizeof(ackTopic), ack.node_id, "ack");
+  updateNodeConfigInterval(ack.node_id, ack.current_interval_sec);
   snprintf(
       ackPayload,
       sizeof(ackPayload),
@@ -1679,6 +2279,7 @@ static void publishAckMqtt(const AckPacketV1 &ack, float rssi, float snr) {
       rssi,
       snr);
   mqttClient.publish(ackTopic, ackPayload, false);
+  publishNodeConfigMqtt(ack.node_id);
 }
 
 static void maybeSendPendingDownlink(uint32_t nodeId, uint32_t currentFcnt) {
@@ -1797,6 +2398,7 @@ void loop() {
   mqttClient.loop();
   ArduinoOTA.handle();
   webServer.handleClient();
+  refreshNodeLiveness();
 
   if (!receivedFlag) {
     delay(10);
@@ -1840,6 +2442,15 @@ void loop() {
     } else {
       const auto *header = reinterpret_cast<const MetricsPacketHeaderV1 *>(plain);
       const auto *records = metrics_packet_records(header);
+      if (!acceptTelemetryFrameCounter(header->node_id, header->frame_counter)) {
+        Serial.printf("Rejected replayed telemetry node=%lu fcnt=%lu\n",
+                      static_cast<unsigned long>(header->node_id),
+                      static_cast<unsigned long>(header->frame_counter));
+        radio.startReceive();
+        rxInterruptEnabled = true;
+        return;
+      }
+      markNodeSeen(header->node_id, "telemetry");
       Serial.printf("Telemetry node=%lu fcnt=%lu metrics=%u rssi=%.1f snr=%.1f\n",
                     static_cast<unsigned long>(header->node_id),
                     static_cast<unsigned long>(header->frame_counter),
@@ -1857,6 +2468,7 @@ void loop() {
       Serial.println("{\"error\":\"join_crc\"}");
     } else {
       const uint16_t shortAddr = getOrAssignShortAddr(joinReq.node_id);
+      markNodeSeen(joinReq.node_id, "join");
       markNodeDiscovered(joinReq.node_id);
       publishJoinMqtt(joinReq.node_id, shortAddr, joinReq.device_type, joinReq.capabilities);
       sendJoinResponse(joinReq.node_id, shortAddr);
@@ -1872,6 +2484,7 @@ void loop() {
     if (!validate_crc_typed(report)) {
       Serial.println("{\"error\":\"interview_crc\"}");
     } else {
+      markNodeSeen(report.node_id, "interview");
       publishInterviewMqtt(report, rssi, snr);
       Serial.printf("INTERVIEW node=%lu short=%u metrics=0x%08lX interval=%lu\n",
                     static_cast<unsigned long>(report.node_id),
@@ -1885,6 +2498,7 @@ void loop() {
     if (!validate_crc_typed(report)) {
       Serial.println("{\"error\":\"attr_crc\"}");
     } else {
+      markNodeSeen(report.node_id, "attr_report");
       publishAttrReportMqtt(report, rssi, snr);
       Serial.printf("ATTR_REPORT node=%lu short=%u cluster=0x%04X attr=0x%04X value=%ld\n",
                     static_cast<unsigned long>(report.node_id),
@@ -1899,6 +2513,7 @@ void loop() {
     if (!validate_packet_crc(ack)) {
       Serial.println("{\"error\":\"ack_crc\"}");
     } else {
+      markNodeSeen(ack.node_id, "ack");
       Serial.printf("ACK node=%lu op=%u param=%u status=%u interval=%lu\n",
                     static_cast<unsigned long>(ack.node_id),
                     ack.acked_operation,

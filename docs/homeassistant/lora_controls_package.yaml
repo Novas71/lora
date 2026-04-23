@@ -297,6 +297,15 @@ script:
           topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
           payload: "{{ {'cmd':'write_attr','cluster': 1280,'attr': 4355,'value': max_mm} | tojson }}"
 
+  lora_get_config_node:
+    alias: LoRa Get Config
+    mode: single
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "lora2ha/node/{{ states('input_text.lora_target_node_id') }}/set"
+          payload: "{{ {'cmd':'get_config'} | tojson }}"
+
   lora_group_add_node:
     alias: LoRa Group Add Node
     mode: single
@@ -452,3 +461,35 @@ automation:
           notification_id: "lora_low_battery_{{ node_id }}"
           title: "LoRa low battery node {{ node_id }}"
           message: "Battery is low ({{ battery_v }} V). Recharge or replace battery."
+
+  - id: lora_liveness_notification
+    alias: LoRa Node Liveness Notification
+    mode: queued
+    trigger:
+      - platform: mqtt
+        topic: "lora2ha/node/+/liveness"
+    variables:
+      data: "{{ trigger.payload_json if trigger.payload_json is defined else {} }}"
+      node_id: "{{ data.node_id | default(trigger.topic.split('/')[2] if trigger.topic is defined else 'unknown') }}"
+      event: "{{ data.event | default('update') }}"
+      age_sec: "{{ data.last_seen_age_sec | default('n/a') }}"
+      timeout_sec: "{{ data.timeout_sec | default('n/a') }}"
+      source: "{{ data.source | default('unknown') }}"
+    action:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ event == 'became_stale' }}"
+            sequence:
+              - service: persistent_notification.create
+                data:
+                  notification_id: "lora_liveness_{{ node_id }}"
+                  title: "LoRa node {{ node_id }} is stale"
+                  message: "Last seen {{ age_sec }} s ago, timeout {{ timeout_sec }} s, last source={{ source }}."
+          - conditions:
+              - condition: template
+                value_template: "{{ event == 'became_online' }}"
+            sequence:
+              - service: persistent_notification.dismiss
+                data:
+                  notification_id: "lora_liveness_{{ node_id }}"

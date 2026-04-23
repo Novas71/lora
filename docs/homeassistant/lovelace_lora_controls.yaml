@@ -60,6 +60,12 @@ cards:
         tap_action:
           action: call-service
           service: script.lora_reboot_node
+      - type: button
+        name: Get Config
+        icon: mdi:cog-refresh-outline
+        tap_action:
+          action: call-service
+          service: script.lora_get_config_node
 
   - type: button
     name: Enter OTA Mode

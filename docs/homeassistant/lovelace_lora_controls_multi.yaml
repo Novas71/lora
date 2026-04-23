@@ -69,6 +69,12 @@ cards:
   - type: horizontal-stack
     cards:
       - type: button
+        name: Get Config
+        icon: mdi:cog-refresh-outline
+        tap_action:
+          action: call-service
+          service: script.lora_get_config_node
+      - type: button
         name: Read Attr
         icon: mdi:database-search
         tap_action:
@@ -246,6 +252,12 @@ cards:
             tap_action:
               action: call-service
               service: script.lora_enter_ota_node
+          - type: button
+            name: Get Config
+            icon: mdi:cog-refresh-outline
+            tap_action:
+              action: call-service
+              service: script.lora_get_config_node
 
       - type: vertical-stack
         cards:
@@ -286,6 +298,12 @@ cards:
             tap_action:
               action: call-service
               service: script.lora_enter_ota_node
+          - type: button
+            name: Get Config
+            icon: mdi:cog-refresh-outline
+            tap_action:
+              action: call-service
+              service: script.lora_get_config_node
 
       - type: vertical-stack
         cards:
@@ -326,6 +344,12 @@ cards:
             tap_action:
               action: call-service
               service: script.lora_enter_ota_node
+          - type: button
+            name: Get Config
+            icon: mdi:cog-refresh-outline
+            tap_action:
+              action: call-service
+              service: script.lora_get_config_node
 
   - type: entities
     title: Last ACK

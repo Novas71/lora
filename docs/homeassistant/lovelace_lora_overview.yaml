@@ -1,0 +1,139 @@
+title: LoRa Fleet Overview
+type: vertical-stack
+cards:
+  - type: markdown
+    content: |
+      ## LoRa Fleet Overview
+      Přehled pro provozní monitoring.
+      Node sloty (1-3) nastav přes helpery `LoRa Overview Node 1/2/3`.
+
+  - type: entities
+    title: Overview Slots
+    show_header_toggle: false
+    entities:
+      - entity: input_text.lora_overview_node_1
+        name: Node slot 1
+      - entity: input_text.lora_overview_node_2
+        name: Node slot 2
+      - entity: input_text.lora_overview_node_3
+        name: Node slot 3
+
+  - type: grid
+    title: Fleet Status
+    columns: 3
+    square: false
+    cards:
+      - type: entities
+        title: Node slot 1
+        show_header_toggle: false
+        entities:
+          - entity: sensor.lora_slot_1_last_seen_age
+            name: Last seen age (s)
+          - entity: binary_sensor.lora_slot_1_stale
+            name: Stale
+          - entity: sensor.lora_slot_1_battery
+            name: Battery (V)
+          - entity: binary_sensor.lora_slot_1_low_battery
+            name: Low battery
+          - entity: sensor.lora_slot_1_interval
+            name: TX interval (s)
+          - entity: sensor.lora_slot_1_groups
+            name: Groups
+          - entity: sensor.lora_slot_1_bindings
+            name: Bindings
+
+      - type: entities
+        title: Node slot 2
+        show_header_toggle: false
+        entities:
+          - entity: sensor.lora_slot_2_last_seen_age
+            name: Last seen age (s)
+          - entity: binary_sensor.lora_slot_2_stale
+            name: Stale
+          - entity: sensor.lora_slot_2_battery
+            name: Battery (V)
+          - entity: binary_sensor.lora_slot_2_low_battery
+            name: Low battery
+          - entity: sensor.lora_slot_2_interval
+            name: TX interval (s)
+          - entity: sensor.lora_slot_2_groups
+            name: Groups
+          - entity: sensor.lora_slot_2_bindings
+            name: Bindings
+
+      - type: entities
+        title: Node slot 3
+        show_header_toggle: false
+        entities:
+          - entity: sensor.lora_slot_3_last_seen_age
+            name: Last seen age (s)
+          - entity: binary_sensor.lora_slot_3_stale
+            name: Stale
+          - entity: sensor.lora_slot_3_battery
+            name: Battery (V)
+          - entity: binary_sensor.lora_slot_3_low_battery
+            name: Low battery
+          - entity: sensor.lora_slot_3_interval
+            name: TX interval (s)
+          - entity: sensor.lora_slot_3_groups
+            name: Groups
+          - entity: sensor.lora_slot_3_bindings
+            name: Bindings
+
+  - type: entities
+    title: Gateway + Last ACK
+    show_header_toggle: false
+    entities:
+      - entity: sensor.lora_gateway_wifi_rssi
+        name: Gateway WiFi RSSI
+      - entity: sensor.lora_gateway_uptime_sec
+        name: Gateway uptime (s)
+      - entity: binary_sensor.lora_gateway_mqtt_connected
+        name: Gateway MQTT connected
+      - entity: sensor.lora_last_ack
+        name: Last ACK status
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: node_id
+        name: ACK node
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: op
+        name: ACK operation
+      - type: attribute
+        entity: sensor.lora_last_ack
+        attribute: status
+        name: ACK status
+
+  - type: entity-filter
+    title: Alerts - Stale Nodes
+    show_empty: false
+    state_filter:
+      - "on"
+    entities:
+      - binary_sensor.lora_slot_1_stale
+      - binary_sensor.lora_slot_2_stale
+      - binary_sensor.lora_slot_3_stale
+
+  - type: entity-filter
+    title: Alerts - Low Battery
+    show_empty: false
+    state_filter:
+      - "on"
+    entities:
+      - binary_sensor.lora_slot_1_low_battery
+      - binary_sensor.lora_slot_2_low_battery
+      - binary_sensor.lora_slot_3_low_battery
+
+  - type: entities
+    title: Quick Links
+    show_header_toggle: false
+    entities:
+      - type: weblink
+        name: LoRa Controls Card
+        url: /lovelace/0
+        icon: mdi:console
+      - type: weblink
+        name: LoRa Multi-Node Card
+        url: /lovelace/0
+        icon: mdi:view-grid

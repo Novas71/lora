@@ -38,6 +38,13 @@ struct DistanceSnapshot {
 
 static DistanceSnapshot lastSnapshot{};
 
+static bool controlTargetsCurrentUplink(const PendingControlPacket &control, uint32_t uplinkFrameCounter) {
+  if (control.isAttrCommand) {
+    return control.attr.target_frame_counter == uplinkFrameCounter;
+  }
+  return control.downlink.target_frame_counter == uplinkFrameCounter;
+}
+
 #if defined(ESP8266) || defined(ESP32)
 ICACHE_RAM_ATTR
 #endif
@@ -773,10 +780,22 @@ void setup() {
     PendingControlPacket control{};
     if (waitForControlPacket(control)) {
       if (control.isAttrCommand) {
-        const uint8_t status = applyAttrCommand(control.attr);
+        const uint8_t status = controlTargetsCurrentUplink(control, ackedFrameCounter) ? applyAttrCommand(control.attr)
+                                                                                   : ACK_REPLAY_DETECTED;
+        if (status == ACK_REPLAY_DETECTED) {
+          Serial.printf("Rejected attr replay/stale target_fcnt=%lu expected=%lu\n",
+                        static_cast<unsigned long>(control.attr.target_frame_counter),
+                        static_cast<unsigned long>(ackedFrameCounter));
+        }
         sendAttrAck(control.attr, ackedFrameCounter, status);
       } else {
-        const uint8_t status = applyDownlink(control.downlink);
+        const uint8_t status = controlTargetsCurrentUplink(control, ackedFrameCounter) ? applyDownlink(control.downlink)
+                                                                                   : ACK_REPLAY_DETECTED;
+        if (status == ACK_REPLAY_DETECTED) {
+          Serial.printf("Rejected downlink replay/stale target_fcnt=%lu expected=%lu\n",
+                        static_cast<unsigned long>(control.downlink.target_frame_counter),
+                        static_cast<unsigned long>(ackedFrameCounter));
+        }
         sendAck(control.downlink, ackedFrameCounter, status);
       }
     }

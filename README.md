@@ -68,8 +68,20 @@ F3 quick start (3 kroky):
 Debug/status topicy:
 - `.../node/<node_id>/groups`
 - `.../node/<node_id>/bindings`
+- `.../node/<node_id>/report_config`
 
-LoRa transport mezi node a gateway je šifrovaný symetricky přes AES-CTR obálku.
+`get_config` / `report_config`:
+- pošli `{"cmd":"get_config"}` na `lora2ha/node/<node_id>/set`
+- gateway okamžitě publikuje agregovaný `report_config`
+- zároveň vyžádá `ATTR_TX_INTERVAL_SEC`, takže se `interval_sec` po probuzení node obnoví i z firmware
+
+`report_config` payload obsahuje typicky:
+- `interval_sec`
+- `groups` + `groups_csv` + `group_count`
+- `bindings` + `bindings_count`
+- `device_type_name`
+
+LoRa transport mezi node a gateway je šifrovaný a autentizovaný symetricky přes `AES-GCM` obálku.
 Nastavení klíče je v [firmware/include/lora_config.h](firmware/include/lora_config.h):
 - `LORA_AES_KEY_HEX` (32 hex znaků = 16 bajtů)
 - hodnota musí být **stejná** na gateway i všech node
@@ -172,6 +184,8 @@ Poznámka k HW:
 V HA musí běžet MQTT broker (typicky Mosquitto addon).
 Po prvním paketu se automaticky vytvoří entity přes MQTT Discovery:
 - `temperature`, `humidity`, `pressure`, `battery`, `rssi`, `snr`
+- `TX interval`, `Groups`, `Bindings` (z `report_config`)
+- `Last seen age`, `Node stale` (z `liveness`)
 
 U distance node se vytvoří a plní zejména:
 - `distance_cm` (aktuální vzdálenost od senzoru)
@@ -184,8 +198,22 @@ Topicy:
 - `lora2ha/node/<node_id>/state`
 - `lora2ha/node/<node_id>/status`
 - `lora2ha/node/<node_id>/availability`
+- `lora2ha/node/<node_id>/report_config`
+- `lora2ha/node/<node_id>/liveness`
 - `lora2ha/gateway/status`
 - `lora2ha/node/<node_id>/ack`
+
+`liveness` payload obsahuje typicky:
+- `last_seen_age_sec`
+- `timeout_sec`
+- `stale` / `online`
+- `source`
+- `event` (`seen`, `tick`, `became_stale`, `became_online`)
+
+Gateway odvozuje timeout automaticky z `interval_sec`:
+- krátké intervaly: přibližně `4x`
+- delší intervaly: přibližně `3x`
+- bez známého intervalu fallback na `1800 s`
 
 ## 4) Downlink příkazy z Home Assistantu
 
@@ -195,6 +223,7 @@ Gateway poslouchá topic:
 Podporované JSON příkazy:
 - `{"cmd":"ping"}`
 - `{"cmd":"reboot"}`
+- `{"cmd":"get_config"}`
 - `{"cmd":"set_param","param":"tx_interval_sec","value":300}`
 - `{"cmd":"enter_ota","sec":300}`
 - `{"cmd":"set_param","param":"tank_area_m2","value":1.25}`
@@ -216,6 +245,17 @@ ACK payload obsahuje:
 - `0` OK
 - `1` unsupported command
 - `2` invalid value
+- `3` replay detected / stale target frame
+
+## 4b) Replay protection
+
+Je doplněna základní replay ochrana nad existujícími čítači:
+- gateway přijímá telemetry uplink jen pokud má `frame_counter` přísně větší než poslední přijatý pro daný node
+- node přijme downlink / `ATTR_CMD` jen pokud `target_frame_counter` přesně odpovídá právě odeslanému uplinku
+
+Důsledek:
+- staré přehrané telemetry pakety gateway zahodí
+- staré přehrané control pakety node odmítne s `ACK status = 3`
 
 ## 5) OTA podpora
 
@@ -281,15 +321,18 @@ pio run -e xiao_esp32s3_sensor -t upload --upload-port lora-sensor.local
 
 V repu je připravený package se helpery + skripty:
 - [docs/homeassistant/lora_controls_package.yaml](docs/homeassistant/lora_controls_package.yaml)
+- Slot helpery pro overview dashboard:
+- [docs/homeassistant/lora_overview_slots_package.yaml](docs/homeassistant/lora_overview_slots_package.yaml)
 - Gateway status package (REST):
 - [docs/homeassistant/lora_gateway_status_package.yaml](docs/homeassistant/lora_gateway_status_package.yaml)
 
 Co obsahuje:
 - `input_text.lora_target_node_id`
 - `input_number.lora_target_interval_sec`
-- skripty `script.lora_ping_node`, `script.lora_reboot_node`, `script.lora_set_interval_node`
+- skripty `script.lora_ping_node`, `script.lora_reboot_node`, `script.lora_set_interval_node`, `script.lora_get_config_node`
 - ACK notifikaci přes `persistent_notification`
 - low-battery notifikaci přes `persistent_notification` (trigger z `lora2ha/node/+/state`)
+- liveness notifikaci při `became_stale` a její zrušení při `became_online`
 
 Zapnutí package v Home Assistantu (`configuration.yaml`):
 
@@ -300,6 +343,7 @@ homeassistant:
 
 Pak zkopíruj soubor do HA:
 - `<config>/packages/lora_controls_package.yaml`
+- `<config>/packages/lora_overview_slots_package.yaml`
 
 Pro monitoring gateway status endpointu `/status` zkopíruj také:
 - `<config>/packages/lora_gateway_status_package.yaml`
@@ -314,6 +358,8 @@ Připravená karta je v:
 - [docs/homeassistant/lovelace_lora_controls.yaml](docs/homeassistant/lovelace_lora_controls.yaml)
 - Multi-node varianta (3 rychlé panely):
 - [docs/homeassistant/lovelace_lora_controls_multi.yaml](docs/homeassistant/lovelace_lora_controls_multi.yaml)
+- Přehledový fleet dashboard:
+- [docs/homeassistant/lovelace_lora_overview.yaml](docs/homeassistant/lovelace_lora_overview.yaml)
 
 Použití v dashboardu:
 - otevři dashboard -> `Edit dashboard` -> `Add card` -> `Manual`
@@ -321,6 +367,11 @@ Použití v dashboardu:
 
 Pro multi-node variantu vlož místo toho obsah z
 - [docs/homeassistant/lovelace_lora_controls_multi.yaml](docs/homeassistant/lovelace_lora_controls_multi.yaml)
+
+Pro provozní monitoring celé flotily můžeš vložit obsah z
+- [docs/homeassistant/lovelace_lora_overview.yaml](docs/homeassistant/lovelace_lora_overview.yaml)
+
+V overview kartě změň hodnoty `LoRa Overview Node 1/2/3` a dashboard se přepne na zvolené node bez editace YAML.
 
 Poznámka:
 - v kartách je mini panel Tank Metrics s příkladovými entitami `sensor.lora_2001_distance_cm`, `sensor.lora_2001_level_cm`, `sensor.lora_2001_water_l`
@@ -357,5 +408,5 @@ V `firmware/include/lora_config.h`:
 ## Poznámky k produkci
 
 - Tento MVP používá `CRC16` proti poškození rámce, ne šifrování.
-- Pro produkční síť přidej AES-CMAC/AES-CTR a per-node klíče.
+- Pro produkční síť přidej per-node klíče a key rotation.
 - Dodržuj regionální duty-cycle limity.

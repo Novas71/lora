@@ -28,6 +28,13 @@ struct PendingControlPacket {
   AttrCommandPacketV1 attr;
 };
 
+static bool controlTargetsCurrentUplink(const PendingControlPacket &control, uint32_t uplinkFrameCounter) {
+  if (control.isAttrCommand) {
+    return control.attr.target_frame_counter == uplinkFrameCounter;
+  }
+  return control.downlink.target_frame_counter == uplinkFrameCounter;
+}
+
 static void loadPersistentState() {
   prefs.begin("sensor", true);
   frameCounter = prefs.getULong("fcnt", 0);
@@ -594,10 +601,22 @@ void setup() {
     PendingControlPacket control{};
     if (waitForControlPacket(control)) {
       if (control.isAttrCommand) {
-        const uint8_t status = applyAttrCommand(control.attr);
+        const uint8_t status = controlTargetsCurrentUplink(control, uplinkFrameCounter) ? applyAttrCommand(control.attr)
+                                                                                    : ACK_REPLAY_DETECTED;
+        if (status == ACK_REPLAY_DETECTED) {
+          Serial.printf("Rejected attr replay/stale target_fcnt=%lu expected=%lu\n",
+                        static_cast<unsigned long>(control.attr.target_frame_counter),
+                        static_cast<unsigned long>(uplinkFrameCounter));
+        }
         sendAttrAck(control.attr, uplinkFrameCounter, status);
       } else {
-        const uint8_t status = applyDownlink(control.downlink);
+        const uint8_t status = controlTargetsCurrentUplink(control, uplinkFrameCounter) ? applyDownlink(control.downlink)
+                                                                                    : ACK_REPLAY_DETECTED;
+        if (status == ACK_REPLAY_DETECTED) {
+          Serial.printf("Rejected downlink replay/stale target_fcnt=%lu expected=%lu\n",
+                        static_cast<unsigned long>(control.downlink.target_frame_counter),
+                        static_cast<unsigned long>(uplinkFrameCounter));
+        }
         sendAck(control.downlink, uplinkFrameCounter, status);
         if (control.downlink.operation == DL_OP_ENTER_OTA && status == ACK_OK) {
           const uint32_t otaWindow = control.downlink.value_i32 > 0 ? static_cast<uint32_t>(control.downlink.value_i32) : 0;

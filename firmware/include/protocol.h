@@ -92,6 +92,7 @@ enum AckStatus : uint8_t {
   ACK_OK = 0x00,
   ACK_UNSUPPORTED_CMD = 0x01,
   ACK_INVALID_VALUE = 0x02,
+  ACK_REPLAY_DETECTED = 0x03,
 };
 
 enum PacketFlags : uint8_t {

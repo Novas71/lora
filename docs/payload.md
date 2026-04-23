@@ -223,6 +223,45 @@ Podporuje stejné payloady jako node-level `.../node/<node_id>/set`, např.:
 Gateway publikuje bindings do:
 - `.../node/<node_id>/bindings`
 
+### Config snapshot (topic `.../node/<node_id>/set`)
+
+- `{"cmd":"get_config"}`
+
+Gateway publikuje agregovaný config snapshot do:
+- `.../node/<node_id>/report_config`
+
+Payload obsahuje kombinaci gateway-side a node-side dat, typicky:
+- `interval_sec` + `interval_known`
+- `groups`, `groups_csv`, `group_count`
+- `bindings`, `bindings_count`
+- `device_type`, `device_type_name`
+
+Poznámka:
+- `groups` a `bindings` jsou gateway-side F3 stav.
+- `interval_sec` se obnovuje přes F2 `ATTR_TX_INTERVAL_SEC` read při `get_config`.
+
+## Node liveness / last-seen
+
+Gateway publikuje liveness snapshot do:
+- `.../node/<node_id>/liveness`
+
+Payload obsahuje typicky:
+- `last_seen_age_sec`
+- `last_seen_uptime_sec`
+- `timeout_sec`
+- `stale`
+- `online`
+- `source`
+- `event`
+
+`event` může být například:
+- `seen`
+- `tick`
+- `became_stale`
+- `became_online`
+
+Gateway současně přepíná retained `.../node/<node_id>/availability` podle liveness timeoutu.
+
 ## AckPacketV1
 
 Binární struktura (`AckPacketV1`):
@@ -244,6 +283,17 @@ Celkem: 20 B.
 - `0` `ACK_OK`
 - `1` `ACK_UNSUPPORTED_CMD`
 - `2` `ACK_INVALID_VALUE`
+- `3` `ACK_REPLAY_DETECTED`
+
+## Replay protection
+
+Aktuální ochrana používá existující čítače v protokolu:
+- gateway validuje `MetricsPacketHeaderV1.frame_counter` per node a odmítá ne-monotónní uplinky
+- node validuje `DownlinkPacketV1.target_frame_counter` a `AttrCommandPacketV1.target_frame_counter`
+
+Platí:
+- control packet je přijat jen když `target_frame_counter == frame_counter` právě odeslaného uplinku node
+- při nesouladu node vrací `ACK_REPLAY_DETECTED`
 
 ### Uplink flags
 

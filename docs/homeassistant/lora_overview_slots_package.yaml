@@ -1,0 +1,151 @@
+input_text:
+  lora_overview_node_1:
+    name: LoRa Overview Node 1
+    initial: "2001"
+    max: 10
+  lora_overview_node_2:
+    name: LoRa Overview Node 2
+    initial: "2002"
+    max: 10
+  lora_overview_node_3:
+    name: LoRa Overview Node 3
+    initial: "2003"
+    max: 10
+
+template:
+  - sensor:
+      - name: "LoRa Slot 1 Last Seen Age"
+        unique_id: lora_slot1_last_seen_age
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_last_seen_age_sec' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 1 Battery"
+        unique_id: lora_slot1_battery
+        unit_of_measurement: "V"
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_battery' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 1 Interval"
+        unique_id: lora_slot1_interval
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_interval_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 1 Groups"
+        unique_id: lora_slot1_groups
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_groups_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 1 Bindings"
+        unique_id: lora_slot1_bindings
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_bindings_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+
+      - name: "LoRa Slot 2 Last Seen Age"
+        unique_id: lora_slot2_last_seen_age
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_last_seen_age_sec' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 2 Battery"
+        unique_id: lora_slot2_battery
+        unit_of_measurement: "V"
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_battery' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 2 Interval"
+        unique_id: lora_slot2_interval
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_interval_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 2 Groups"
+        unique_id: lora_slot2_groups
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_groups_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 2 Bindings"
+        unique_id: lora_slot2_bindings
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_bindings_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+
+      - name: "LoRa Slot 3 Last Seen Age"
+        unique_id: lora_slot3_last_seen_age
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_last_seen_age_sec' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 3 Battery"
+        unique_id: lora_slot3_battery
+        unit_of_measurement: "V"
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_battery' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 3 Interval"
+        unique_id: lora_slot3_interval
+        unit_of_measurement: "s"
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_interval_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 3 Groups"
+        unique_id: lora_slot3_groups
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_groups_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+      - name: "LoRa Slot 3 Bindings"
+        unique_id: lora_slot3_bindings
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {% set entity = 'sensor.lora_' ~ node ~ '_bindings_cfg' %}
+          {% if has_value(entity) %}{{ states(entity) }}{% else %}unknown{% endif %}
+
+  - binary_sensor:
+      - name: "LoRa Slot 1 Stale"
+        unique_id: lora_slot1_stale
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_stale', 'on') }}
+      - name: "LoRa Slot 1 Low Battery"
+        unique_id: lora_slot1_low_battery
+        state: >
+          {% set node = states('input_text.lora_overview_node_1') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_low_battery', 'on') }}
+
+      - name: "LoRa Slot 2 Stale"
+        unique_id: lora_slot2_stale
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_stale', 'on') }}
+      - name: "LoRa Slot 2 Low Battery"
+        unique_id: lora_slot2_low_battery
+        state: >
+          {% set node = states('input_text.lora_overview_node_2') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_low_battery', 'on') }}
+
+      - name: "LoRa Slot 3 Stale"
+        unique_id: lora_slot3_stale
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_stale', 'on') }}
+      - name: "LoRa Slot 3 Low Battery"
+        unique_id: lora_slot3_low_battery
+        state: >
+          {% set node = states('input_text.lora_overview_node_3') | trim %}
+          {{ is_state('binary_sensor.lora_' ~ node ~ '_low_battery', 'on') }}
