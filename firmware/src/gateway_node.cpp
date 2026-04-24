@@ -14,6 +14,8 @@
 #include "protocol.h"
 #include "secure_transport.h"
 
+extern "C" int ets_printf(const char *format, ...);
+
 using namespace lora_app;
 
 SX1262 radio = new Module(LORA_CS_PIN, LORA_DIO1_PIN, LORA_RST_PIN, LORA_BUSY_PIN);
@@ -25,8 +27,109 @@ WebServer webServer(80);
 volatile bool receivedFlag = false;
 volatile bool rxInterruptEnabled = true;
 static bool webUploadAuthorized = false;
+static bool radioReady = false;
+
+void setFlag(void);
+static void safeCopy(char *dst, size_t dstLen, const char *src);
+static bool parseIp(const char *value, IPAddress &ip);
+static void saveConfig();
+
+static bool waitForRadioBusyRelease(uint32_t timeoutMs) {
+  const uint32_t start = millis();
+  while (digitalRead(LORA_BUSY_PIN) == HIGH) {
+    if (millis() - start >= timeoutMs) {
+      return false;
+    }
+    delay(5);
+  }
+  return true;
+}
+
+static bool prepareRadioModule() {
+  pinMode(LORA_BUSY_PIN, INPUT);
+  pinMode(LORA_RST_PIN, OUTPUT);
+  pinMode(LORA_CS_PIN, OUTPUT);
+  digitalWrite(LORA_CS_PIN, HIGH);
+
+  digitalWrite(LORA_RST_PIN, LOW);
+  delay(10);
+  digitalWrite(LORA_RST_PIN, HIGH);
+  delay(20);
+
+  if (!waitForRadioBusyRelease(1500)) {
+    ets_printf("APP EARLY: radio BUSY timeout after reset\n");
+    Serial.println("Radio BUSY stuck after reset; skipping init");
+    radioReady = false;
+    return false;
+  }
+
+  return true;
+}
+
+static const char *resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_EXT:
+      return "external";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "int_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_DEEPSLEEP:
+      return "deepsleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    default:
+      return "unknown";
+  }
+}
+
+static bool initLoRaRadio() {
+  if (!prepareRadioModule()) {
+    return false;
+  }
+
+  int state = radio.begin(
+      LORA_FREQUENCY_MHZ,
+      LORA_BANDWIDTH_KHZ,
+      LORA_SPREADING_FACTOR,
+      LORA_CODING_RATE,
+      LORA_SYNC_WORD,
+      LORA_TX_POWER_DBM,
+      LORA_PREAMBLE_LEN,
+      0);
+
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("Radio init failed, state=%d\n", state);
+    radioReady = false;
+    return false;
+  }
+
+  radio.setDio1Action(setFlag);
+  state = radio.startReceive();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.printf("startReceive failed, state=%d\n", state);
+    radioReady = false;
+    return false;
+  }
+
+  radioReady = true;
+  Serial.println("LoRa radio ready");
+  return true;
+}
 
 struct GatewayConfig {
+  char wifiSsid[33];
+  char wifiPass[65];
   char mqttHost[64];
   uint16_t mqttPort;
   char mqttUser[64];
@@ -40,6 +143,67 @@ struct GatewayConfig {
 };
 
 GatewayConfig config{};
+
+static String htmlEscape(const char *value) {
+  String out;
+  const char *src = value == nullptr ? "" : value;
+  while (*src) {
+    switch (*src) {
+      case '&':
+        out += "&amp;";
+        break;
+      case '<':
+        out += "&lt;";
+        break;
+      case '>':
+        out += "&gt;";
+        break;
+      case '\"':
+        out += "&quot;";
+        break;
+      case '\'':
+        out += "&#39;";
+        break;
+      default:
+        out += *src;
+        break;
+    }
+    src++;
+  }
+  return out;
+}
+
+static void appendConfigInput(String &page, const char *label, const char *name, const char *value, const char *type = "text") {
+  page += "<label style='display:block;margin:.55rem 0'><span style='display:block;font-size:.92rem;color:#333;margin-bottom:.2rem'>";
+  page += label;
+  page += "</span><input name='";
+  page += name;
+  page += "' type='";
+  page += type;
+  page += "' value='";
+  page += htmlEscape(value).c_str();
+  page += "' style='width:100%;padding:.55rem;border:1px solid #bbb;border-radius:.45rem;box-sizing:border-box'></label>";
+}
+
+static void applyStaticIpConfig() {
+  IPAddress ip, gw, mask, dns;
+  if (parseIp(config.staIp, ip) && parseIp(config.staGw, gw) && parseIp(config.staMask, mask)) {
+    if (parseIp(config.staDns, dns)) {
+      WiFi.config(ip, gw, mask, dns);
+    } else {
+      WiFi.config(ip, gw, mask);
+    }
+  }
+}
+
+static const char *activeWifiSsid() {
+  return strlen(config.wifiSsid) > 0 ? config.wifiSsid : WIFI_SSID;
+}
+
+static const char *activeWifiPassword() {
+  return strlen(config.wifiPass) > 0 ? config.wifiPass : WIFI_PASSWORD;
+}
+
 static void setupOta() {
   ArduinoOTA.setHostname(OTA_HOSTNAME_GATEWAY);
   if (strlen(OTA_PASSWORD) > 0) {
@@ -81,8 +245,14 @@ static void setupWebOtaServer() {
     doc["device"] = "lora-gateway";
     doc["ip"] = WiFi.localIP().toString();
     doc["hostname"] = OTA_HOSTNAME_GATEWAY;
+    doc["wifi_ssid"] = activeWifiSsid();
     doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
     doc["wifi_rssi"] = WiFi.RSSI();
+    doc["wifi_bssid"] = WiFi.BSSIDstr();
+    doc["wifi_channel"] = WiFi.channel();
+    doc["sta_mac"] = WiFi.macAddress();
+    doc["gateway_ip"] = WiFi.gatewayIP().toString();
+    doc["subnet_mask"] = WiFi.subnetMask().toString();
     doc["mqtt_connected"] = mqttClient.connected();
     doc["mqtt_host"] = config.mqttHost;
     doc["mqtt_port"] = config.mqttPort;
@@ -103,24 +273,84 @@ static void setupWebOtaServer() {
     }
 
     String page;
-    page.reserve(1600);
+    page.reserve(5200);
     page += "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
-    page += "<title>LoRa Gateway OTA</title></head><body style='font-family:sans-serif;max-width:700px;margin:2rem auto;padding:0 1rem'>";
-    page += "<h2>LoRa Gateway OTA</h2>";
+    page += "<title>LoRa Gateway</title></head><body style='font-family:sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.4'>";
+    page += "<h2>LoRa Gateway</h2>";
     page += "<p><b>IP:</b> ";
     page += WiFi.localIP().toString();
     page += "<br><b>Hostname:</b> ";
     page += OTA_HOSTNAME_GATEWAY;
+    page += "<br><b>WiFi SSID:</b> ";
+    page += htmlEscape(activeWifiSsid()).c_str();
+    page += "<br><b>MQTT:</b> ";
+    page += htmlEscape(config.mqttHost).c_str();
+    page += ":";
+    page += String(config.mqttPort);
     page += "</p>";
+
+    page += "<div style='border:1px solid #ddd;border-radius:.6rem;padding:1rem;margin:1rem 0 1.25rem 0;background:#fafafa'>";
+    page += "<h3 style='margin-top:0'>Konfigurace</h3>";
+    page += "<form method='POST' action='/config'>";
+    appendConfigInput(page, "WiFi SSID", "wifi_ssid", activeWifiSsid());
+    appendConfigInput(page, "WiFi heslo", "wifi_pass", activeWifiPassword(), "password");
+    appendConfigInput(page, "MQTT host", "mqtt_host", config.mqttHost);
+    char mqttPortStr[8];
+    snprintf(mqttPortStr, sizeof(mqttPortStr), "%u", config.mqttPort);
+    appendConfigInput(page, "MQTT port", "mqtt_port", mqttPortStr, "number");
+    appendConfigInput(page, "MQTT user", "mqtt_user", config.mqttUser);
+    appendConfigInput(page, "MQTT heslo", "mqtt_pass", config.mqttPass, "password");
+    appendConfigInput(page, "MQTT base topic", "mqtt_base", config.mqttBaseTopic);
+    appendConfigInput(page, "MQTT client id", "mqtt_cid", config.mqttClientId);
+    appendConfigInput(page, "Statická IP", "sta_ip", config.staIp);
+    appendConfigInput(page, "Gateway", "sta_gw", config.staGw);
+    appendConfigInput(page, "Maska", "sta_mask", config.staMask);
+    appendConfigInput(page, "DNS", "sta_dns", config.staDns);
+    page += "<p style='color:#666;font-size:.92rem'>Po uložení se gateway restartuje a použije nové nastavení.</p>";
+    page += "<p><button type='submit' style='padding:.6rem 1rem'>Uložit konfiguraci</button></p>";
+    page += "</form></div>";
+
+    page += "<div style='border:1px solid #ddd;border-radius:.6rem;padding:1rem;background:#fafafa'>";
+    page += "<h3 style='margin-top:0'>OTA update</h3>";
     page += "<form method='POST' action='/update' enctype='multipart/form-data'>";
     page += "<p><input type='file' name='firmware' accept='.bin' required></p>";
     page += "<p><button type='submit' style='padding:.6rem 1rem'>Upload & Flash</button></p>";
     page += "</form>";
     page += "<p style='color:#666'>Použij .bin soubor pro env xiao_esp32s3_gateway.</p>";
     page += "<p><a href='/status'>Gateway status JSON</a></p>";
+    page += "</div>";
     page += "</body></html>";
 
     webServer.send(200, "text/html", page);
+  });
+
+  webServer.on("/config", HTTP_POST, []() {
+    if (!webAuthOk()) {
+      return;
+    }
+
+    safeCopy(config.wifiSsid, sizeof(config.wifiSsid), webServer.arg("wifi_ssid").c_str());
+    safeCopy(config.wifiPass, sizeof(config.wifiPass), webServer.arg("wifi_pass").c_str());
+    safeCopy(config.mqttHost, sizeof(config.mqttHost), webServer.arg("mqtt_host").c_str());
+    safeCopy(config.mqttUser, sizeof(config.mqttUser), webServer.arg("mqtt_user").c_str());
+    safeCopy(config.mqttPass, sizeof(config.mqttPass), webServer.arg("mqtt_pass").c_str());
+    safeCopy(config.mqttBaseTopic, sizeof(config.mqttBaseTopic), webServer.arg("mqtt_base").c_str());
+    safeCopy(config.mqttClientId, sizeof(config.mqttClientId), webServer.arg("mqtt_cid").c_str());
+    safeCopy(config.staIp, sizeof(config.staIp), webServer.arg("sta_ip").c_str());
+    safeCopy(config.staGw, sizeof(config.staGw), webServer.arg("sta_gw").c_str());
+    safeCopy(config.staMask, sizeof(config.staMask), webServer.arg("sta_mask").c_str());
+    safeCopy(config.staDns, sizeof(config.staDns), webServer.arg("sta_dns").c_str());
+
+    const uint16_t mqttPort = static_cast<uint16_t>(webServer.arg("mqtt_port").toInt());
+    config.mqttPort = mqttPort == 0 ? MQTT_PORT : mqttPort;
+
+    saveConfig();
+    Serial.println("Web config saved, restarting...");
+    webServer.send(200,
+                   "text/html",
+                   "<html><body style='font-family:sans-serif;max-width:680px;margin:2rem auto;padding:0 1rem'><h3>Konfigurace ulozena</h3><p>Gateway se restartuje a pouzije nove nastaveni.</p><p><a href='/'>Zpet</a></p></body></html>");
+    delay(600);
+    ESP.restart();
   });
 
   webServer.on(
@@ -572,6 +802,8 @@ static void publishRetained(const char *topic, const char *payload) {
 }
 
 static void loadConfig() {
+  safeCopy(config.wifiSsid, sizeof(config.wifiSsid), WIFI_SSID);
+  safeCopy(config.wifiPass, sizeof(config.wifiPass), WIFI_PASSWORD);
   safeCopy(config.mqttHost, sizeof(config.mqttHost), MQTT_HOST);
   config.mqttPort = MQTT_PORT;
   safeCopy(config.mqttUser, sizeof(config.mqttUser), MQTT_USERNAME);
@@ -584,6 +816,8 @@ static void loadConfig() {
   config.staDns[0] = '\0';
 
   prefs.begin("gateway", true);
+  String wifiSsid = prefs.getString("wifi_ssid", config.wifiSsid);
+  String wifiPass = prefs.getString("wifi_pass", config.wifiPass);
   String mqttHost = prefs.getString("mqtt_host", config.mqttHost);
   String mqttUser = prefs.getString("mqtt_user", config.mqttUser);
   String mqttPass = prefs.getString("mqtt_pass", config.mqttPass);
@@ -596,6 +830,8 @@ static void loadConfig() {
   uint16_t mqttPort = static_cast<uint16_t>(prefs.getUInt("mqtt_port", config.mqttPort));
   prefs.end();
 
+  safeCopy(config.wifiSsid, sizeof(config.wifiSsid), wifiSsid.c_str());
+  safeCopy(config.wifiPass, sizeof(config.wifiPass), wifiPass.c_str());
   safeCopy(config.mqttHost, sizeof(config.mqttHost), mqttHost.c_str());
   safeCopy(config.mqttUser, sizeof(config.mqttUser), mqttUser.c_str());
   safeCopy(config.mqttPass, sizeof(config.mqttPass), mqttPass.c_str());
@@ -610,6 +846,8 @@ static void loadConfig() {
 
 static void saveConfig() {
   prefs.begin("gateway", false);
+  prefs.putString("wifi_ssid", config.wifiSsid);
+  prefs.putString("wifi_pass", config.wifiPass);
   prefs.putString("mqtt_host", config.mqttHost);
   prefs.putUInt("mqtt_port", config.mqttPort);
   prefs.putString("mqtt_user", config.mqttUser);
@@ -627,10 +865,55 @@ static void onPortalSaveConfig() {
   shouldSavePortalConfig = true;
 }
 
+static bool tryConfiguredWifi(uint32_t timeoutMs) {
+  const char *wifiSsid = activeWifiSsid();
+  const char *wifiPass = activeWifiPassword();
+  if (strlen(wifiSsid) == 0) {
+    return false;
+  }
+
+  applyStaticIpConfig();
+  Serial.printf("Trying configured WiFi SSID=%s ...\n", wifiSsid);
+  ets_printf("APP WIFI: trying configured SSID=%s\n", wifiSsid);
+  WiFi.begin(wifiSsid, wifiPass);
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+    delay(250);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi connected via configured credentials, IP=%s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("WiFi details: BSSID=%s channel=%d RSSI=%d\n", WiFi.BSSIDstr().c_str(), WiFi.channel(), WiFi.RSSI());
+    Serial.printf("WiFi details: STA_MAC=%s GW=%s MASK=%s\n",
+                  WiFi.macAddress().c_str(),
+                  WiFi.gatewayIP().toString().c_str(),
+                  WiFi.subnetMask().toString().c_str());
+    ets_printf("APP WIFI: connected ip=%s\n", WiFi.localIP().toString().c_str());
+    ets_printf("APP WIFI: bssid=%s channel=%d rssi=%d\n", WiFi.BSSIDstr().c_str(), WiFi.channel(), WiFi.RSSI());
+    return true;
+  }
+
+  Serial.println("Configured WiFi connect failed");
+  ets_printf("APP WIFI: configured connect failed\n");
+  WiFi.disconnect(true, true);
+  delay(200);
+  return false;
+}
+
 static void setupWifiWithPortal() {
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(OTA_HOSTNAME_GATEWAY);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+
+  if (tryConfiguredWifi(15000)) {
+    return;
+  }
 
   WiFiManager wm;
+  wm.setHostname(OTA_HOSTNAME_GATEWAY);
   wm.setSaveConfigCallback(onPortalSaveConfig);
 
   WiFiManagerParameter pMqttHost("mqtt_host", "MQTT host", config.mqttHost, sizeof(config.mqttHost));
@@ -671,9 +954,11 @@ static void setupWifiWithPortal() {
 
   Serial.println("Connecting WiFi (auto) / fallback AP captive portal...");
   if (!wm.autoConnect(FALLBACK_AP_SSID, FALLBACK_AP_PASSWORD)) {
-    Serial.println("WiFi setup failed, rebooting...");
-    delay(1000);
-    ESP.restart();
+    Serial.println("WiFi autoConnect failed, entering captive portal...");
+    if (!wm.startConfigPortal(FALLBACK_AP_SSID, FALLBACK_AP_PASSWORD)) {
+      Serial.println("Config portal failed, continuing without WiFi (will retry in loop)");
+      return;
+    }
   }
 
   safeCopy(config.mqttHost, sizeof(config.mqttHost), pMqttHost.getValue());
@@ -696,6 +981,7 @@ static void setupWifiWithPortal() {
   }
 
   Serial.printf("WiFi connected, IP=%s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("WiFi details: BSSID=%s channel=%d RSSI=%d\n", WiFi.BSSIDstr().c_str(), WiFi.channel(), WiFi.RSSI());
 }
 
 static void publishGatewayStatus() {
@@ -706,13 +992,17 @@ static void publishGatewayStatus() {
 
 static void loadF3State() {
   prefs.begin("gateway", true);
-  const size_t groupBytes = prefs.getBytesLength("f3_groups");
-  if (groupBytes == sizeof(groupTable)) {
-    prefs.getBytes("f3_groups", groupTable, sizeof(groupTable));
+  if (prefs.isKey("f3_groups")) {
+    const size_t groupBytes = prefs.getBytesLength("f3_groups");
+    if (groupBytes == sizeof(groupTable)) {
+      prefs.getBytes("f3_groups", groupTable, sizeof(groupTable));
+    }
   }
-  const size_t bindBytes = prefs.getBytesLength("f3_binds");
-  if (bindBytes == sizeof(bindRuleTable)) {
-    prefs.getBytes("f3_binds", bindRuleTable, sizeof(bindRuleTable));
+  if (prefs.isKey("f3_binds")) {
+    const size_t bindBytes = prefs.getBytesLength("f3_binds");
+    if (bindBytes == sizeof(bindRuleTable)) {
+      prefs.getBytes("f3_binds", bindRuleTable, sizeof(bindRuleTable));
+    }
   }
   prefs.end();
 }
@@ -1535,10 +1825,17 @@ static void mqttCallback(char *topic, uint8_t *payload, unsigned int length) {
 }
 
 static void ensureWifiConnected() {
+  static wl_status_t lastStatus = WL_IDLE_STATUS;
+  const wl_status_t currentStatus = WiFi.status();
+  if (currentStatus != lastStatus) {
+    Serial.printf("WiFi status changed: %d -> %d\n", static_cast<int>(lastStatus), static_cast<int>(currentStatus));
+    lastStatus = currentStatus;
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
-  Serial.println("WiFi disconnected, reconnecting...");
+  Serial.printf("WiFi disconnected (status=%d), reconnecting...\n", static_cast<int>(WiFi.status()));
   WiFi.reconnect();
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
@@ -1558,6 +1855,17 @@ static void ensureMqttConnected() {
     return;
   }
 
+  static uint32_t nextRetryMs = 0;
+  const uint32_t now = millis();
+  if (now < nextRetryMs) {
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    nextRetryMs = now + 3000;
+    return;
+  }
+
   mqttClient.setServer(config.mqttHost, config.mqttPort);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(1024);
@@ -1565,30 +1873,28 @@ static void ensureMqttConnected() {
   char statusTopic[96];
   snprintf(statusTopic, sizeof(statusTopic), "%s/gateway/status", config.mqttBaseTopic);
 
-  while (!mqttClient.connected()) {
-    Serial.printf("Connecting MQTT %s:%u ... ", config.mqttHost, config.mqttPort);
-    bool connected;
-    if (strlen(config.mqttUser) > 0) {
-      connected = mqttClient.connect(config.mqttClientId, config.mqttUser, config.mqttPass, statusTopic, 1, true, "offline");
-    } else {
-      connected = mqttClient.connect(config.mqttClientId, statusTopic, 1, true, "offline");
-    }
-
-    if (!connected) {
-      Serial.printf("failed rc=%d\n", mqttClient.state());
-      delay(3000);
-      continue;
-    }
-
-    char setWildcard[96];
-    char groupSetWildcard[96];
-    snprintf(setWildcard, sizeof(setWildcard), "%s/node/+/set", config.mqttBaseTopic);
-    snprintf(groupSetWildcard, sizeof(groupSetWildcard), "%s/group/+/set", config.mqttBaseTopic);
-    mqttClient.subscribe(setWildcard);
-    mqttClient.subscribe(groupSetWildcard);
-    publishGatewayStatus();
-    Serial.println("ok");
+  Serial.printf("Connecting MQTT %s:%u ... ", config.mqttHost, config.mqttPort);
+  bool connected;
+  if (strlen(config.mqttUser) > 0) {
+    connected = mqttClient.connect(config.mqttClientId, config.mqttUser, config.mqttPass, statusTopic, 1, true, "offline");
+  } else {
+    connected = mqttClient.connect(config.mqttClientId, statusTopic, 1, true, "offline");
   }
+
+  if (!connected) {
+    Serial.printf("failed rc=%d\n", mqttClient.state());
+    nextRetryMs = now + 3000;
+    return;
+  }
+
+  char setWildcard[96];
+  char groupSetWildcard[96];
+  snprintf(setWildcard, sizeof(setWildcard), "%s/node/+/set", config.mqttBaseTopic);
+  snprintf(groupSetWildcard, sizeof(groupSetWildcard), "%s/group/+/set", config.mqttBaseTopic);
+  mqttClient.subscribe(setWildcard);
+  mqttClient.subscribe(groupSetWildcard);
+  publishGatewayStatus();
+  Serial.println("ok");
 }
 
 static void publishDiscoverySensor(uint32_t nodeId, const char *key, const char *name, const char *unit,
@@ -2354,42 +2660,48 @@ static void maybeSendPendingAttrCommand(uint32_t nodeId, uint32_t currentFcnt) {
 }
 
 void setup() {
+  ets_printf("\nAPP EARLY: setup entered\n");
   Serial.begin(115200);
+  ets_printf("APP EARLY: Serial.begin ok\n");
   delay(1200);
+  ets_printf("APP EARLY: post-delay\n");
+  const esp_reset_reason_t reason = esp_reset_reason();
+  ets_printf("APP EARLY: got reset reason=%d\n", static_cast<int>(reason));
+  Serial.printf("Boot reset_reason=%d (%s)\n", static_cast<int>(reason), resetReasonName(reason));
 
+  ets_printf("APP EARLY: loadConfig start\n");
   loadConfig();
+  ets_printf("APP EARLY: loadConfig done\n");
+
+  ets_printf("APP EARLY: loadF3State start\n");
   loadF3State();
+  ets_printf("APP EARLY: loadF3State done\n");
+
+  ets_printf("APP EARLY: setupWifiWithPortal start\n");
   setupWifiWithPortal();
+  ets_printf("APP EARLY: setupWifiWithPortal done\n");
 
+  ets_printf("APP EARLY: SPI.begin start\n");
   SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN);
+  ets_printf("APP EARLY: SPI.begin done\n");
 
-  int state = radio.begin(
-      LORA_FREQUENCY_MHZ,
-      LORA_BANDWIDTH_KHZ,
-      LORA_SPREADING_FACTOR,
-      LORA_CODING_RATE,
-      LORA_SYNC_WORD,
-      LORA_TX_POWER_DBM,
-      LORA_PREAMBLE_LEN,
-      0);
+  ets_printf("APP EARLY: initLoRaRadio start\n");
+  initLoRaRadio();
+  ets_printf("APP EARLY: initLoRaRadio done\n");
 
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("Radio init failed, state=%d\n", state);
-    delay(5000);
-    ESP.restart();
-  }
-
+  ets_printf("APP EARLY: ensureMqttConnected start\n");
   ensureMqttConnected();
-  setupOta();
-  setupWebOtaServer();
+  ets_printf("APP EARLY: ensureMqttConnected done\n");
 
-  radio.setDio1Action(setFlag);
-  state = radio.startReceive();
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("startReceive failed, state=%d\n", state);
-  } else {
-    Serial.println("Gateway ready");
-  }
+  ets_printf("APP EARLY: setupOta start\n");
+  setupOta();
+  ets_printf("APP EARLY: setupOta done\n");
+
+  ets_printf("APP EARLY: setupWebOtaServer start\n");
+  setupWebOtaServer();
+  ets_printf("APP EARLY: setupWebOtaServer done\n");
+  Serial.println("Gateway ready");
+  ets_printf("APP EARLY: setup complete\n");
 }
 
 void loop() {
@@ -2399,6 +2711,18 @@ void loop() {
   ArduinoOTA.handle();
   webServer.handleClient();
   refreshNodeLiveness();
+
+  if (!radioReady) {
+    static uint32_t nextRadioRetryMs = 0;
+    const uint32_t now = millis();
+    if (now >= nextRadioRetryMs) {
+      Serial.println("Retrying LoRa radio init...");
+      initLoRaRadio();
+      nextRadioRetryMs = now + 10000UL;
+    }
+    delay(50);
+    return;
+  }
 
   if (!receivedFlag) {
     delay(10);

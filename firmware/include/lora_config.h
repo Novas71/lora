@@ -142,11 +142,11 @@
 #endif
 
 #ifndef WIFI_SSID
-#define WIFI_SSID "CHANGE_ME_WIFI_SSID"
+#define WIFI_SSID "oskarsnet"
 #endif
 
 #ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "CHANGE_ME_WIFI_PASSWORD"
+#define WIFI_PASSWORD "beRuska711018"
 #endif
 
 #ifndef MQTT_HOST
